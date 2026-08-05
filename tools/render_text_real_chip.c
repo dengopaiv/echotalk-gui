@@ -1,4 +1,4 @@
-/*
+﻿/*
  * render_text_real_chip.c -- SUPERSEDED, kept for comparison only.
  *
  * Use tools/render_text_loader.c instead. This harness boots Textalker
@@ -38,15 +38,7 @@ static uint8_t mem[0x10000];
 static tms5220_state tms;
 static int readlatch_flag = 1;
 
-static int16_t *audio = NULL;
-static size_t audio_count = 0, audio_cap = 0;
-static void audio_push(int16_t s) {
-    if (audio_count >= audio_cap) {
-        audio_cap = audio_cap ? audio_cap * 2 : 65536;
-        audio = realloc(audio, audio_cap * sizeof(int16_t));
-    }
-    audio[audio_count++] = s;
-}
+#define audio_count render_audio_count()
 
 #define CPU_HZ      1020484.0
 #define CHIP_HZ     8000.0
@@ -58,7 +50,7 @@ static void tick_chip(uint32_t elapsed_cpu_cycles) {
     while (tick_accumulator >= CYCLES_PER_SAMPLE) {
         int16_t sample;
         tms5220_process(&tms, &sample, 1);
-        audio_push(sample);
+        render_audio_push(sample, tms.m_TALKD);
         tick_accumulator -= CYCLES_PER_SAMPLE;
     }
 }
@@ -191,6 +183,9 @@ int main(int argc, char **argv) {
 
     for (long i = 0; i < tlen; i++) {
         uint8_t ch = text[i] | 0x80;
+        /* Mark where each utterance begins (start of text, and after
+         * every CR) so its think-time dead air can be trimmed. */
+        if (i == 0 || text[i - 1] == '\r') render_mark_utterance();
         sp = 0xFD;
         int s = run_to_halt(0xD006, 5000000, 0x0201, 1, ch);
         if (s >= 5000000) {
@@ -210,6 +205,6 @@ int main(int argc, char **argv) {
         idle_guard++;
     }
 
-    render_finish(&g_ropts, in_path, out_path, tlen, (uint32_t)CHIP_HZ, audio, audio_count);
+    render_finish(&g_ropts, in_path, out_path, tlen, (uint32_t)CHIP_HZ);
     return 0;
 }

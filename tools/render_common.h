@@ -22,12 +22,27 @@
 #include "text_prep.h"
 #include "chunker.h"
 
-/* A sample counts as silence below this. The TMS5220 does not idle at
- * exactly zero, so a zero test would find "audio" immediately. */
-#define TRIM_SILENCE_THRESHOLD 150
-/* Samples of lead-in kept before the first real audio, so trimming can
- * never bite into the attack of the first phoneme. 40 is 5ms at 8kHz. */
+/* Samples of lead-in kept before speech resumes, so trimming can never
+ * bite into the attack of the first phoneme. 40 is 5ms at 8kHz. */
 #define TRIM_KEEP_MARGIN 40
+
+/* --- Dead air between utterances ---
+ *
+ * Textalker processes a whole line before it sends anything to the
+ * chip, and that work scales with how much text there is. While it is
+ * thinking, the chip has nothing to play, so the renderer emits silence
+ * -- a pause before each chunk whose length tracks the chunk's length.
+ * That is a batch-rendering artifact, not speech.
+ *
+ * It must not be confused with the pauses Textalker puts after a
+ * period or comma, which are real content. The two are easy to tell
+ * apart at the chip level rather than by looking at the waveform: an
+ * intentional pause is the chip *playing* silent frames, with TALKD
+ * asserted, whereas dead air is the chip idle with TALKD clear. So we
+ * record, per sample, whether the chip was speaking, and only ever trim
+ * runs where it was not. Punctuation pauses survive by construction --
+ * there is no threshold to tune and no way for the trimmer to reach
+ * them. */
 
 /* Textalker's repeat-character filter collapses runs of the same
  * character, so a decorative line of asterisks is not read out one
@@ -58,7 +73,8 @@
 
 typedef struct {
     int verbose;
-    int trim;
+    int trim;               /* trim dead air at the start of the file */
+    int gap_trim;           /* ...and at the start of every utterance */
     int repeat_filter_fix;  /* send REPEAT_FILTER_DISABLE during init */
     int raw_input;          /* skip text preparation */
     int chunk_size;         /* 0 = do not chunk */
@@ -66,7 +82,38 @@ typedef struct {
     int npos;
 } render_opts;
 
-static render_opts g_ropts = { 0, 1, 1, 0, DEFAULT_CHUNK_SIZE, { 0 }, 0 };
+static render_opts g_ropts = { 0, 1, 1, 1, 0, DEFAULT_CHUNK_SIZE, { 0 }, 0 };
+
+/* --- Shared capture buffer ---
+ * Holds the samples plus, in parallel, whether the chip was speaking
+ * when each was produced. Lives here rather than in each harness so all
+ * three trim identically. */
+static int16_t *r_audio = NULL;
+static uint8_t *r_speaking = NULL;
+static size_t r_count = 0, r_cap = 0;
+
+/* Sample offsets at which a new utterance begins, i.e. where dead air
+ * may be trimmed. Index 0 is implicit (start of file). */
+static size_t r_marks[4096];
+static size_t r_nmarks = 0;
+
+static inline void render_audio_push(int16_t s, int speaking) {
+    if (r_count >= r_cap) {
+        r_cap = r_cap ? r_cap * 2 : 65536;
+        r_audio = (int16_t *)realloc(r_audio, r_cap * sizeof(int16_t));
+        r_speaking = (uint8_t *)realloc(r_speaking, r_cap);
+    }
+    r_speaking[r_count] = (uint8_t)(speaking ? 1 : 0);
+    r_audio[r_count++] = s;
+}
+
+static inline size_t render_audio_count(void) { return r_count; }
+
+/* Call immediately before sending the first character of an utterance. */
+static inline void render_mark_utterance(void) {
+    if (r_nmarks < sizeof(r_marks) / sizeof(r_marks[0]))
+        r_marks[r_nmarks++] = r_count;
+}
 
 #define VLOG(...) do { if (g_ropts.verbose) fprintf(stderr, __VA_ARGS__); } while (0)
 
@@ -100,6 +147,7 @@ static inline int render_parse_args(int argc, char **argv, int need,
         else if (!strcmp(arg, "--no-repeat-fix")) o->repeat_filter_fix = 0;
         else if (!strcmp(arg, "--raw")) o->raw_input = 1;
         else if (!strcmp(arg, "--no-chunk")) o->chunk_size = 0;
+        else if (!strcmp(arg, "--keep-chunk-gaps")) o->gap_trim = 0;
         else if (!strcmp(arg, "--chunk") && i + 1 < argc) o->chunk_size = atoi(argv[++i]);
         else if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             render_usage(argv[0], argspec);
@@ -206,16 +254,34 @@ static inline uint8_t *render_chunk_lines(const render_opts *o,
     return out;
 }
 
-/* Index of the first sample that is not leading silence, backed off by
- * TRIM_KEEP_MARGIN. Returns 0 if the whole buffer is silent, so an
- * all-silent result is never turned into an empty file. */
-static inline size_t render_trim_offset(const int16_t *pcm, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        int mag = pcm[i] < 0 ? -pcm[i] : pcm[i];
-        if (mag > TRIM_SILENCE_THRESHOLD)
-            return i > TRIM_KEEP_MARGIN ? i - TRIM_KEEP_MARGIN : 0;
+/* A sample counts as audible above this. The TMS5220 does not idle at
+ * exactly zero, so a zero test would find "audio" immediately. */
+#define TRIM_SILENCE_THRESHOLD 150
+
+/* From `start`, how many samples of dead air precede the point real
+ * output begins, less the keep-margin.
+ *
+ * The scan stops at the first sample that is both *played by the chip*
+ * (TALKD set) and *audible*. Both conditions matter: TALKD alone would
+ * stop on the obligatory silent frame the chip emits when speech
+ * restarts, which is a restart artifact rather than content; amplitude
+ * alone could stop on a stray non-zero sample while the chip is idle.
+ *
+ * Because the scan stops at the first audible output, it can only ever
+ * consume silence at the very head of an utterance -- a pause after a
+ * comma or period, which by definition follows audible speech, is
+ * unreachable. Returns 0 if nothing audible follows, so trailing
+ * silence is never swallowed either. */
+static inline size_t render_dead_air(size_t start, size_t end) {
+    size_t i = start;
+    while (i < end) {
+        int mag = r_audio[i] < 0 ? -r_audio[i] : r_audio[i];
+        if (r_speaking[i] && mag > TRIM_SILENCE_THRESHOLD) break;
+        i++;
     }
-    return 0;
+    if (i >= end) return 0;              /* nothing audible follows */
+    size_t run = i - start;
+    return run > TRIM_KEEP_MARGIN ? run - TRIM_KEEP_MARGIN : 0;
 }
 
 static inline void render_wav_write(const char *path, uint32_t rate,
@@ -236,34 +302,70 @@ static inline void render_wav_write(const char *path, uint32_t rate,
     fclose(f);
 }
 
-/* Writes the WAV (trimmed unless --no-trim) and prints the end-of-run
- * summary. Reports the untrimmed total as well, so results stay
- * comparable against the documented reference sample counts. */
+/* Writes the WAV and prints the end-of-run summary.
+ *
+ * Dead air (chip idle, TALKD clear) is removed from the head of the
+ * file and from the head of each utterance; silence the chip actually
+ * played -- Textalker's pauses after punctuation -- is always kept.
+ * Reports the untrimmed total too, so results stay comparable against
+ * the documented reference sample counts. */
 static inline void render_finish(const render_opts *o, const char *in_path,
                                  const char *out_path, long nchars,
-                                 uint32_t rate, const int16_t *pcm, size_t n) {
-    size_t offset = o->trim ? render_trim_offset(pcm, n) : 0;
-    size_t kept = n - offset;
+                                 uint32_t rate) {
+    size_t n = r_count;
+    int16_t *out = (int16_t *)malloc((n ? n : 1) * sizeof(int16_t));
+    size_t w = 0, trimmed_head = 0, trimmed_gaps = 0;
+    int gaps_trimmed = 0;
+
+    /* Walk the utterances in order, skipping each one's dead air.
+     *
+     * The first mark is the start of the first utterance; everything
+     * before it is init (and the repeat-filter command), which is dead
+     * air of exactly the same kind. So region 0 runs from sample 0
+     * rather than from that mark -- the two are merged, and the head
+     * gets trimmed as one piece. */
+    size_t nregions = r_nmarks ? r_nmarks : 1;
+    size_t pos = 0;
+    for (size_t m = 0; m < nregions; m++) {
+        size_t start = (m == 0) ? 0 : r_marks[m];
+        size_t end = (m + 1 < nregions) ? r_marks[m + 1] : n;
+        if (start < pos) start = pos;
+        if (end < start) end = start;
+
+        int is_head = (m == 0);
+        int want = is_head ? o->trim : o->gap_trim;
+        size_t skip = want ? render_dead_air(start, end) : 0;
+        if (skip) {
+            if (is_head) trimmed_head = skip;
+            else { trimmed_gaps += skip; gaps_trimmed++; }
+        }
+        for (size_t i = start + skip; i < end; i++) out[w++] = r_audio[i];
+        pos = end;
+    }
 
     int lo = 0, hi = 0, clipped = 0;
-    for (size_t i = offset; i < n; i++) {
-        if (pcm[i] < lo) lo = pcm[i];
-        if (pcm[i] > hi) hi = pcm[i];
-        if (pcm[i] >= 32767 || pcm[i] <= -32768) clipped++;
+    for (size_t i = 0; i < w; i++) {
+        if (out[i] < lo) lo = out[i];
+        if (out[i] > hi) hi = out[i];
+        if (out[i] >= 32767 || out[i] <= -32768) clipped++;
     }
     int peak = hi > -lo ? hi : -lo;
 
-    render_wav_write(out_path, rate, pcm + offset, kept);
+    render_wav_write(out_path, rate, out, w);
 
     fprintf(stderr, "%s -> %s\n", in_path, out_path);
     fprintf(stderr, "  %ld chars, %zu samples (%.3f s) at %u Hz\n",
             nchars, n, (double)n / rate, rate);
-    if (offset)
-        fprintf(stderr, "  trimmed %zu leading silent samples (%.3f s), wrote %zu (%.3f s)\n",
-                offset, (double)offset / rate, kept, (double)kept / rate);
-    else if (!o->trim)
-        fprintf(stderr, "  leading silence kept (--no-trim)\n");
+    if (trimmed_head)
+        fprintf(stderr, "  trimmed %zu samples (%.3f s) of leading dead air\n",
+                trimmed_head, (double)trimmed_head / rate);
+    if (gaps_trimmed)
+        fprintf(stderr, "  trimmed %zu samples (%.3f s) of dead air before %d utterance(s)\n",
+                trimmed_gaps, (double)trimmed_gaps / rate, gaps_trimmed);
+    if (trimmed_head || trimmed_gaps)
+        fprintf(stderr, "  wrote %zu samples (%.3f s)\n", w, (double)w / rate);
     fprintf(stderr, "  peak %d, range %d/+%d, clipped %d\n", peak, lo, hi, clipped);
+    free(out);
 }
 
 #endif /* RENDER_COMMON_H */
