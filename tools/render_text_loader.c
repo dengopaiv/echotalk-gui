@@ -103,6 +103,7 @@ static double tick_accumulator = 0.0;
  * FIFO is, and the energy index of the current frame (0 = silent frame,
  * 15 = stop frame). */
 static int chip_trace = 0;
+static unsigned long frames_played = 0;
 static void trace_chip_state(void) {
     static int first = 1;
     static int p_talkd, p_empty, p_energy, p_spen, p_ddis, p_talk;
@@ -128,7 +129,13 @@ static void tick_chip(uint32_t elapsed_cpu_cycles) {
     tick_accumulator += elapsed_cpu_cycles;
     while (tick_accumulator >= CYCLES_PER_SAMPLE) {
         int16_t sample;
+        static int prev_ip = -1, prev_talkd = -1;
         tms5220_process(&tms, &sample, 1);
+        /* Count frame boundaries the same way MAME's log does: one per
+         * IP wrap (7 -> 0) while the chip is speaking. Directly
+         * comparable with MAME's "RESETL4, status updated" line count. */
+        if (prev_ip == 7 && tms.m_IP == 0 && prev_talkd) frames_played++;
+        prev_ip = tms.m_IP; prev_talkd = tms.m_TALKD;
         /* TALKD distinguishes silence the chip is playing (a real pause)
          * from the chip sitting idle while the 6502 thinks (dead air). */
         render_audio_push(sample, tms.m_TALKD);
@@ -411,6 +418,7 @@ int main(int argc, char **argv) {
         idle_guard++;
     }
 
+    fprintf(stderr, "  frames played: %lu\\n", frames_played);
     render_finish(&g_ropts, in_path, out_path, tlen, (uint32_t)CHIP_HZ);
     return 0;
 }
