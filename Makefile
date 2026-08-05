@@ -43,11 +43,12 @@
 # which ship with Windows itself) -- verified by inspecting import
 # tables and by actually running both builds under Wine.
 
-CFLAGS_COMMON = -Wall -O2 -Ithird_party/tms5220_core -Itools
+CFLAGS_COMMON = -Wall -O2 -Ithird_party/tms5220_core -Itools -Isrc
 
 EMU_SOURCES = third_party/fake6502/fake6502.c \
               third_party/tms5220_core/tms5220_core.c \
-              third_party/tms5220_core/tms5220_reset.c
+              third_party/tms5220_core/tms5220_reset.c \
+              src/text_prep.c
 
 # The canonical v3.1.3 harness: boots via Textalker's own loader.
 SOURCES_LOADER = tools/render_text_loader.c $(EMU_SOURCES)
@@ -58,6 +59,10 @@ SOURCES_V13 = tools/render_v13.c $(EMU_SOURCES)
 
 SOURCES_RESAMPLE = tools/resample_wav.c
 SOURCES_WAVSTATS = tools/wav_stats.c
+
+# Pure-logic unit tests, no emulator involved.
+SOURCES_TEST_PREP = tools/test_text_prep.c src/text_prep.c
+SOURCES_TEST_CHUNKER = tools/test_chunker.c src/chunker.c
 
 CC_NATIVE ?= gcc
 
@@ -99,7 +104,7 @@ endif
 
 BUILD_DIR = build
 
-.PHONY: all native win64 win32 windows clean check-mingw64 check-mingw32
+.PHONY: all native win64 win32 windows test clean check-mingw64 check-mingw32
 
 all: native
 
@@ -206,6 +211,20 @@ $(BUILD_DIR)/native/resample_wav: $(SOURCES_RESAMPLE)
 $(BUILD_DIR)/native/wav_stats: $(SOURCES_WAVSTATS)
 	mkdir -p $(BUILD_DIR)/native
 	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_WAVSTATS)
+
+$(BUILD_DIR)/native/test_text_prep: $(SOURCES_TEST_PREP)
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_TEST_PREP)
+
+$(BUILD_DIR)/native/test_chunker: $(SOURCES_TEST_CHUNKER)
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_TEST_CHUNKER)
+
+# Runs the pure-logic unit tests. Does not need any ROM.
+test: $(BUILD_DIR)/native/test_text_prep $(BUILD_DIR)/native/test_chunker
+	@$(BUILD_DIR)/native/test_text_prep
+	@echo
+	@$(BUILD_DIR)/native/test_chunker
 
 clean:
 	rm -rf $(BUILD_DIR)

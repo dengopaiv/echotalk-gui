@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include "text_prep.h"
 
 /* A sample counts as silence below this. The TMS5220 does not idle at
  * exactly zero, so a zero test would find "audio" immediately. */
@@ -27,14 +28,26 @@
  * never bite into the attack of the first phoneme. 40 is 5ms at 8kHz. */
 #define TRIM_KEEP_MARGIN 40
 
+/* Textalker's repeat-character filter collapses runs of the same
+ * character, so a decorative line of asterisks is not read out one
+ * "star" at a time. It does not distinguish decoration from content,
+ * though: "EEEEEEEEE" is spoken as if it were "EE". Sending Ctrl-E, a
+ * repeat count of 99, then R sets the threshold high enough that the
+ * filter never triggers in practice.
+ *
+ * Send this once, after init and before any real text. */
+#define REPEAT_FILTER_DISABLE "\x05" "99R"
+
 typedef struct {
     int verbose;
     int trim;
+    int repeat_filter_fix;  /* send REPEAT_FILTER_DISABLE during init */
+    int raw_input;          /* skip text preparation */
     const char *pos[8];
     int npos;
 } render_opts;
 
-static render_opts g_ropts = { 0, 1, { 0 }, 0 };
+static render_opts g_ropts = { 0, 1, 1, 0, { 0 }, 0 };
 
 #define VLOG(...) do { if (g_ropts.verbose) fprintf(stderr, __VA_ARGS__); } while (0)
 
@@ -43,10 +56,14 @@ static inline void render_usage(const char *prog, const char *argspec) {
         "usage: %s [options] %s\n"
         "\n"
         "options:\n"
-        "  -v, --verbose   boot diagnostics and per-character progress\n"
-        "      --no-trim   keep leading silence (needed to reproduce the\n"
-        "                  documented reference sample counts exactly)\n"
-        "  -h, --help      this message\n",
+        "  -v, --verbose       boot diagnostics and per-character progress\n"
+        "      --no-trim       keep leading silence (needed to reproduce the\n"
+        "                      documented reference sample counts exactly)\n"
+        "      --no-repeat-fix leave Textalker's repeat-character filter at its\n"
+        "                      default, where \"EEEEEEEEE\" is spoken as \"EE\"\n"
+        "      --raw           send input bytes as-is, with no conversion to\n"
+        "                      7-bit ASCII and no LF stripping\n"
+        "  -h, --help          this message\n",
         prog, argspec);
 }
 
@@ -57,6 +74,8 @@ static inline int render_parse_args(int argc, char **argv, int need,
         const char *arg = argv[i];
         if (!strcmp(arg, "-v") || !strcmp(arg, "--verbose")) o->verbose = 1;
         else if (!strcmp(arg, "--no-trim")) o->trim = 0;
+        else if (!strcmp(arg, "--no-repeat-fix")) o->repeat_filter_fix = 0;
+        else if (!strcmp(arg, "--raw")) o->raw_input = 1;
         else if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             render_usage(argv[0], argspec);
             exit(0);
@@ -73,6 +92,34 @@ static inline int render_parse_args(int argc, char **argv, int need,
         return 1;
     }
     return 0;
+}
+
+/* Loads a file and converts it to the 7-bit ASCII Textalker expects
+ * (unless --raw). Returns a malloc'd buffer and sets *out_len; the
+ * caller owns it. Exits on failure, since every caller would anyway. */
+static inline uint8_t *render_load_input(const render_opts *o,
+                                         const char *path, long *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror(path); exit(1); }
+    fseek(f, 0, SEEK_END);
+    long raw_len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *raw = (uint8_t *)malloc(raw_len ? raw_len : 1);
+    if (raw_len && fread(raw, 1, raw_len, f) != (size_t)raw_len) {
+        perror(path); fclose(f); exit(1);
+    }
+    fclose(f);
+
+    if (o->raw_input) { *out_len = raw_len; return raw; }
+
+    size_t need = echotalk_prep_text(raw, (size_t)raw_len, NULL, 0, NULL);
+    char *prepped = (char *)malloc(need + 1);
+    echotalk_prep_text(raw, (size_t)raw_len, prepped, need + 1, NULL);
+    if ((long)need != raw_len && o->verbose)
+        fprintf(stderr, "Text preparation: %ld bytes in, %zu out\n", raw_len, need);
+    free(raw);
+    *out_len = (long)need;
+    return (uint8_t *)prepped;
 }
 
 /* Index of the first sample that is not leading silence, backed off by

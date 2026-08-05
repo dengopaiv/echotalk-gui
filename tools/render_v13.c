@@ -144,14 +144,8 @@ int main(int argc, char **argv) {
     fclose(fo);
     VLOG("Loaded %zu bytes of OBJ at $D400\n", no);
 
-    FILE *tf = fopen(in_path, "rb");
-    if (!tf) { perror(in_path); return 1; }
-    fseek(tf, 0, SEEK_END);
-    long tlen = ftell(tf);
-    fseek(tf, 0, SEEK_SET);
-    uint8_t *text = malloc(tlen);
-    if (fread(text, 1, tlen, tf) != (size_t)tlen) { perror("read text"); return 1; }
-    fclose(tf);
+    long tlen = 0;
+    uint8_t *text = render_load_input(&g_ropts, in_path, &tlen);
 
     /* Stub the handful of real Apple ROM monitor routines the loader
      * calls early on (apparent screen/calibration text output, not
@@ -181,6 +175,18 @@ int main(int argc, char **argv) {
     VLOG("Loader ($9300) ran: %d steps, echo writes during load: %d\n", steps, echo_write_count);
     VLOG("  $EC0B (last successful candidate low byte, 0 if none): $%02X\n", mem[0xEC0B]);
     VLOG("  $F48F (install-success flag): $%02X\n", mem[0xF48F]);
+
+    /* v1.3 predates several v3.1.3 commands and silently discards any it
+     * does not recognise (see HANDOFF.md on the $D857 dispatch chain),
+     * so sending this is safe whether or not v1.3 implements it --
+     * verified to leave every reference render byte-identical. */
+    if (g_ropts.repeat_filter_fix) {
+        for (const char *p = REPEAT_FILTER_DISABLE; *p; p++) {
+            sp = 0xFD;
+            run_to_halt(0xD400, 5000000, 0x0201, 1, (uint8_t)(*p | 0x80));
+        }
+        VLOG("Sent repeat-filter disable (Ctrl-E 99 R)\n");
+    }
 
     for (long i = 0; i < tlen; i++) {
         uint8_t ch = text[i] | 0x80;

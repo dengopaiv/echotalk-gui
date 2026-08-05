@@ -304,6 +304,12 @@ All values below use Ctrl-E (`\x05`) as prefix unless noted:
 - Expanded/slow speech: `\x05E` (default)
 - Compressed/fast speech: `\x05C`
 - Talk-only mode (no screen echo assumed): `\x05T`
+- Repeat-character filter: `\x05` + digits + `R`. Collapses runs of the
+  same character (so `*****` is not read out one "star" at a time) but
+  applies to letters too, so `EEEEEEEEE` is spoken as `EE`. **Send
+  `\x05` + `99` + `R` once after init to effectively disable it** --
+  the render tools do this by default (`--no-repeat-fix` to opt out).
+  See `notes/input_handling_repeat_filter_and_encoding.md`.
 - Phoneme mode: `\x16` (Ctrl-V) + phoneme string + `\r` to terminate.
   Known-good test string (from Street Electronics' own demo.bas,
   extracted this session): `OR3%2M@PRO3GRAMM&%SI/FO3N&1MZS,4W'R3DS#NDS`
@@ -314,6 +320,15 @@ All values below use Ctrl-E (`\x05`) as prefix unless noted:
   (v1.3) entry points -- the render tools do this automatically
   (`| 0x80`) given plain ASCII input, so input files should NOT have
   the high bit pre-set.
+- That high bit is a **transport** convention, not an encoding. Text
+  must already be 7-bit ASCII before it gets there: Textalker predates
+  Latin-1, Windows-1252 and UTF-8 entirely, and a raw byte >= `$80`
+  in the input collides with the transport convention. `src/text_prep.c`
+  converts modern text (UTF-8 or legacy single-byte, detected per
+  character) down to ASCII, and also strips LF -- the Apple II ends
+  lines with CR, and Textalker announces a stray LF as "linefeed" in
+  all-punctuation mode. Run it **before** the chunker, since it can
+  change the text's length.
 
 ## Single-letter-word bug: SOLVED (session 8)
 

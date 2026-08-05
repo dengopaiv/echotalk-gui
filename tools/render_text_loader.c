@@ -202,14 +202,8 @@ int main(int argc, char **argv) {
     fclose(fr);
     VLOG("Loaded %zu bytes of TEXTALKER.RAM (loader) at $9300\n", nr);
 
-    FILE *tf = fopen(in_path, "rb");
-    if (!tf) { perror(in_path); return 1; }
-    fseek(tf, 0, SEEK_END);
-    long tlen = ftell(tf);
-    fseek(tf, 0, SEEK_SET);
-    uint8_t *text = malloc(tlen);
-    if (fread(text, 1, tlen, tf) != (size_t)tlen) { perror("read text"); return 1; }
-    fclose(tf);
+    long tlen = 0;
+    uint8_t *text = render_load_input(&g_ropts, in_path, &tlen);
 
     bank_trace = getenv("ECHOTALK_BANK_TRACE") != NULL;
 
@@ -312,6 +306,19 @@ int main(int argc, char **argv) {
      * that moment -- the trampoline's own $C08B read is what switches
      * the card in. It also means the character is passed the way real
      * hardware passes it, in A, with the trampoline doing the push. */
+    #define SEND_CHAR(c) do {                                     \
+        sp = 0xFD;                                                \
+        a = (uint8_t)((c) | 0x80);                                \
+        run_to_halt(0xBA7C, 5000000, 0x0201, 0, 0);               \
+    } while (0)
+
+    /* Disable the repeat-character filter now that init is complete and
+     * before any real text -- see REPEAT_FILTER_DISABLE. */
+    if (g_ropts.repeat_filter_fix) {
+        for (const char *p = REPEAT_FILTER_DISABLE; *p; p++) SEND_CHAR(*p);
+        VLOG("Sent repeat-filter disable (Ctrl-E 99 R)\n");
+    }
+
     for (long i = 0; i < tlen; i++) {
         uint8_t ch = text[i] | 0x80;
         sp = 0xFD;

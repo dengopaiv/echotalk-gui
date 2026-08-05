@@ -152,14 +152,8 @@ int main(int argc, char **argv) {
     fclose(f);
     VLOG("Loaded %zu bytes of TEXTALKER.OBJ at $D000\n", n);
 
-    FILE *tf = fopen(in_path, "rb");
-    if (!tf) { perror(in_path); return 1; }
-    fseek(tf, 0, SEEK_END);
-    long tlen = ftell(tf);
-    fseek(tf, 0, SEEK_SET);
-    uint8_t *text = malloc(tlen);
-    fread(text, 1, tlen, tf);
-    fclose(tf);
+    long tlen = 0;
+    uint8_t *text = render_load_input(&g_ropts, in_path, &tlen);
 
     tms5220_reset(&tms, TMS5220_IS_5220);
     install_wild_jump_trap();
@@ -186,6 +180,14 @@ int main(int argc, char **argv) {
          steps, mem[0xFD87] == 0x1F ? "SUCCEEDED" : "FAILED", mem[0xFD87]);
     if (mem[0xFD87] != 0x1F)
         fprintf(stderr, "WARNING: card detection did not succeed (FD87=$%02X)\n", mem[0xFD87]);
+
+    if (g_ropts.repeat_filter_fix) {
+        for (const char *p = REPEAT_FILTER_DISABLE; *p; p++) {
+            sp = 0xFD;
+            run_to_halt(0xD006, 5000000, 0x0201, 1, (uint8_t)(*p | 0x80));
+        }
+        VLOG("Sent repeat-filter disable (Ctrl-E 99 R)\n");
+    }
 
     for (long i = 0; i < tlen; i++) {
         uint8_t ch = text[i] | 0x80;
