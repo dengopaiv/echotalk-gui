@@ -117,10 +117,27 @@
 #define UNDOCUMENTED //when this is defined, undocumented opcodes are handled.
                      //otherwise, they're simply treated as NOPs.
 
-#define NES_CPU      //when this is defined, the binary-coded decimal (BCD)
+//#define NES_CPU    //when this is defined, the binary-coded decimal (BCD)
                      //status flag is not honored by ADC and SBC. the 2A03
                      //CPU in the Nintendo Entertainment System does not
                      //support BCD operation.
+                     //
+                     //EchoTalk change (session 10): upstream Fake6502
+                     //ships with this ENABLED by default, and its own
+                     //header comment says to comment it out if you are
+                     //not emulating a NES. The Apple II uses a standard
+                     //MOS 6502 with working decimal mode, so leaving it
+                     //defined was incorrect for this project.
+                     //
+                     //Disabling it is confirmed to be a no-op for every
+                     //case tested: instrumenting ADC/SBC to count
+                     //executions with the D flag set gives ZERO across
+                     //all five reference_text/ inputs under both
+                     //Textalker v3.1.3 and v1.3, and all ten resulting
+                     //WAVs are byte-identical either way. Textalker
+                     //simply never uses decimal mode. Corrected anyway,
+                     //so that any future code path that does use it
+                     //behaves like the real hardware.
 
 #define FLAG_CARRY     0x01
 #define FLAG_ZERO      0x02
@@ -332,11 +349,11 @@ static void adc() {
     zerocalc(result);
     overflowcalc(result, a, value);
     signcalc(result);
-    
+
     #ifndef NES_CPU
     if (status & FLAG_DECIMAL) {
         clearcarry();
-        
+
         if ((a & 0x0F) > 0x09) {
             a += 0x06;
         }
@@ -709,7 +726,7 @@ static void sbc() {
     #ifndef NES_CPU
     if (status & FLAG_DECIMAL) {
         clearcarry();
-        
+
         a -= 0x66;
         if ((a & 0x0F) > 0x09) {
             a += 0x06;
