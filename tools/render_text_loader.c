@@ -95,8 +95,41 @@ static void audio_push(int16_t s) {
 
 #define CPU_HZ      1020484.0
 #define CHIP_HZ     8000.0
-#define CYCLES_PER_SAMPLE (CPU_HZ / CHIP_HZ)
+/* Overridable for experiments only (ECHOTALK_CPU_HZ). The real values
+ * are an Apple II 6502 at ~1.0205MHz and a TMS5220 clocked at 640kHz,
+ * which divides to 8000 samples/sec -- 127.56 CPU cycles per sample. */
+static double cycles_per_sample = CPU_HZ / CHIP_HZ;
+#define CYCLES_PER_SAMPLE cycles_per_sample
 static double tick_accumulator = 0.0;
+
+/* Chip-state trace (ECHOTALK_CHIP_TRACE=1). Reads the chip struct
+ * directly rather than instrumenting the core, so the ported code stays
+ * untouched. Logs the transitions that matter for diagnosing pacing:
+ * whether the chip is speaking (TALKD), whether it has run out of data
+ * (buffer_empty -- the `goto ranout` path in parse_frame), how full the
+ * FIFO is, and the energy index of the current frame (0 = silent frame,
+ * 15 = stop frame). */
+static int chip_trace = 0;
+static void trace_chip_state(void) {
+    static int first = 1;
+    static int p_talkd, p_empty, p_energy, p_spen, p_ddis, p_talk;
+    static int p_fifo_zero;
+    int talkd = tms.m_TALKD, empty = tms.m_buffer_empty;
+    int energy = tms.m_new_frame_energy_idx;
+    int fifo_zero = (tms.m_fifo_count == 0);
+    int spen = tms.m_SPEN, ddis = tms.m_DDIS, talk = tms.m_TALK;
+    if (first || talkd != p_talkd || empty != p_empty ||
+        energy != p_energy || fifo_zero != p_fifo_zero ||
+        spen != p_spen || ddis != p_ddis || talk != p_talk) {
+        fprintf(stderr, "[chip] %7.1fms  TALK=%d TALKD=%d SPEN=%d DDIS=%d BE=%d fifo=%2d energy=%2d%s\n",
+                audio_count / 8.0, talk, talkd, spen, ddis, empty,
+                tms.m_fifo_count, energy,
+                energy == 0 ? "  (silent)" : energy == 15 ? "  (STOP)" : "");
+        first = 0;
+        p_talkd = talkd; p_empty = empty; p_energy = energy; p_fifo_zero = fifo_zero;
+        p_spen = spen; p_ddis = ddis; p_talk = talk;
+    }
+}
 
 static void tick_chip(uint32_t elapsed_cpu_cycles) {
     tick_accumulator += elapsed_cpu_cycles;
@@ -104,6 +137,7 @@ static void tick_chip(uint32_t elapsed_cpu_cycles) {
         int16_t sample;
         tms5220_process(&tms, &sample, 1);
         audio_push(sample);
+        if (chip_trace) trace_chip_state();
         tick_accumulator -= CYCLES_PER_SAMPLE;
     }
 }
@@ -206,6 +240,11 @@ int main(int argc, char **argv) {
     uint8_t *text = render_load_input(&g_ropts, in_path, &tlen);
 
     bank_trace = getenv("ECHOTALK_BANK_TRACE") != NULL;
+    chip_trace = getenv("ECHOTALK_CHIP_TRACE") != NULL;
+    { const char *hz = getenv("ECHOTALK_CPU_HZ");
+      if (hz) { cycles_per_sample = atof(hz) / CHIP_HZ;
+                fprintf(stderr, "[experiment] CPU %s Hz -> %.3f cycles/sample\n",
+                        hz, cycles_per_sample); } }
 
     tms5220_reset(&tms, TMS5220_IS_5220);
     install_wild_jump_trap();

@@ -585,18 +585,10 @@ void tms5220_process(tms5220_state *tms, int16_t *buffer, unsigned int size)
 			}
 			this_sample = tms5220_lattice_filter(tms); /* execute lattice filter */
 
-			//
-			
-			//
-			for (i=0; i<10; i++)
-				
-			
-//#ifdef TMS5220_PERFECT_INTERPOLATION_HACK
-//          
-//#else
-//          
-//#endif
-			
+			/* (MAME logs the u[] lattice state here in a for loop; the
+			 * loop body was log-only, so it is dropped rather than left
+			 * behind as an empty-bodied for that captures the next
+			 * statement.) */
 
 			/* next, force result to 14 bits (since its possible that the addition at the final (k1) stage of the lattice overflowed) */
 			while (this_sample > 16383) this_sample -= 32768;
@@ -641,10 +633,13 @@ void tms5220_process(tms5220_state *tms, int16_t *buffer, unsigned int size)
 					tms->m_OLDP = (tms->m_new_frame_pitch_idx == 0); // tms->m_OLDP
 					/* if TALK was clear last frame, halt speech now, since TALKD (latched from TALK on new frame) just went inactive. */
 
-					
-					if ((!tms->m_TALK) && (!tms->m_SPEN))
-						
-
+					/* NOTE: in MAME this latch is preceded by an
+					 * `if ((!m_TALK) && (!m_SPEN))` guarding a LOGMASKED
+					 * call only. Stripping the log statement during the
+					 * port left the `if` with an empty body, so it
+					 * captured the latch below and made it conditional --
+					 * see notes/pacing_talkd_latch_bug.md. The latch is
+					 * unconditional; do not reintroduce a guard here. */
 					tms->m_TALKD = tms->m_TALK; // TALKD is latched from TALK
 					tms5220_update_fifo_status_and_ints(tms); // to trigger an interrupt if talk_status has changed
 					if ((!tms->m_TALK) && tms->m_SPEN) tms->m_TALK = true; // TALK is only activated if it wasn't already active, if tms->m_SPEN is active, and if we're in RESETL4 (which we are).
@@ -728,20 +723,17 @@ void tms5220_process_command(tms5220_state *tms, uint8_t cmd)
 			tms->m_pending_ticks = TMS5220_READ_COMMAND_DELAY_SAMPLES;
 			tms->m_command_register = NOCOMMAND;
 		}
-		else
-			
+		/* (MAME logs here in the else; dropping the log statement must
+		 * not leave the break as the else's body -- that would fall
+		 * through into the next case.) */
 		break;
 
 	case 0x00:
 	case 0x20: /* set rate (tms5220c and cd2501ecd only), otherwise NOP */
 		if (TMS5220_HAS_RATE_CONTROL)
 		{
-			
 			tms->m_c_variant_rate = cmd&0x0F;
 		}
-		else
-			
-
 		tms->m_command_register = NOCOMMAND;
 		break;
 
@@ -759,8 +751,6 @@ void tms5220_process_command(tms5220_state *tms, uint8_t cmd)
 
 			if (0)
 				tms5220_vsm_read_and_branch(tms);
-			else
-				
 
 			tms->m_command_register = NOCOMMAND;
 		}
@@ -1110,8 +1100,6 @@ uint8_t tms5220_status_r(tms5220_state *tms)
 		/* actually in a read ? */
 		if (tms->m_rs_ws == 0x01)
 			return tms->m_read_latch;
-		else
-			
 		return 0xff; // tms->m_write_latch; // TODO: return open bus?
 	}
 }
