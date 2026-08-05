@@ -1,4 +1,9 @@
 # Onset glitch investigation (session 9) -- reverted, documented, unresolved
+#
+# >>> RESOLVED IN SESSION 10. See notes/onset_glitch_fixed_by_real_loader.md.
+# >>> The cause was not the lattice filter warming up, as concluded below.
+# >>> It was that the harness skipped Textalker's real loader. Everything
+# >>> under "What was tried" remains accurate as a record of dead ends.
 
 ## The symptom
 A brief "weird noise" / click at the very start of speech, but only for

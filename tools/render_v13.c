@@ -16,6 +16,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "tms5220_core.h"
+#include "render_common.h"
 
 extern uint16_t pc;
 extern uint8_t sp, a, x, y, status;
@@ -123,41 +124,28 @@ static int run_to_halt(uint16_t entry, int max_steps, uint16_t halt_addr,
     return steps;
 }
 
-static void wav_write(const char *path, uint32_t rate, const int16_t *pcm, size_t n) {
-    FILE *f = fopen(path, "wb");
-    uint32_t data_bytes = (uint32_t)(n * 2);
-    uint32_t byte_rate = rate * 2;
-    uint16_t block_align = 2, bits = 16, fmt = 1, ch = 1;
-    uint32_t fmt_size = 16, riff_size = 36 + data_bytes;
-    fwrite("RIFF", 1, 4, f); fwrite(&riff_size, 4, 1, f); fwrite("WAVE", 1, 4, f);
-    fwrite("fmt ", 1, 4, f); fwrite(&fmt_size, 4, 1, f);
-    fwrite(&fmt, 2, 1, f); fwrite(&ch, 2, 1, f);
-    fwrite(&rate, 4, 1, f); fwrite(&byte_rate, 4, 1, f);
-    fwrite(&block_align, 2, 1, f); fwrite(&bits, 2, 1, f);
-    fwrite("data", 1, 4, f); fwrite(&data_bytes, 4, 1, f);
-    fwrite(pcm, 2, n, f);
-    fclose(f);
-}
-
 int main(int argc, char **argv) {
-    if (argc < 5) {
-        fprintf(stderr, "usage: %s <ram_loader.bin> <obj.bin> <input bytes file> <output.wav>\n", argv[0]);
+    if (render_parse_args(argc, argv, 4,
+                          "<ram_loader.bin> <obj.bin> <input bytes file> <output.wav>",
+                          &g_ropts))
         return 1;
-    }
-    FILE *fr = fopen(argv[1], "rb");
-    if (!fr) { perror("open ram loader"); return 1; }
+    const char *ram_path = g_ropts.pos[0], *obj_path = g_ropts.pos[1];
+    const char *in_path  = g_ropts.pos[2], *out_path = g_ropts.pos[3];
+
+    FILE *fr = fopen(ram_path, "rb");
+    if (!fr) { perror(ram_path); return 1; }
     size_t nr = fread(mem + 0x9300, 1, 0x2000, fr);
     fclose(fr);
-    fprintf(stderr, "Loaded %zu bytes of RAM loader at $9300\n", nr);
+    VLOG("Loaded %zu bytes of RAM loader at $9300\n", nr);
 
-    FILE *fo = fopen(argv[2], "rb");
-    if (!fo) { perror("open obj"); return 1; }
+    FILE *fo = fopen(obj_path, "rb");
+    if (!fo) { perror(obj_path); return 1; }
     size_t no = fread(mem + 0xD400, 1, 0x2C00, fo);
     fclose(fo);
-    fprintf(stderr, "Loaded %zu bytes of OBJ at $D400\n", no);
+    VLOG("Loaded %zu bytes of OBJ at $D400\n", no);
 
-    FILE *tf = fopen(argv[3], "rb");
-    if (!tf) { perror("open text"); return 1; }
+    FILE *tf = fopen(in_path, "rb");
+    if (!tf) { perror(in_path); return 1; }
     fseek(tf, 0, SEEK_END);
     long tlen = ftell(tf);
     fseek(tf, 0, SEEK_SET);
@@ -190,9 +178,9 @@ int main(int argc, char **argv) {
     mem[0x01FF] = (uint8_t)(((halt_addr_loader - 1) >> 8) & 0xFF);
 
     int steps = run_to_halt(0x9300, 2000000, halt_addr_loader, 0, 0);
-    fprintf(stderr, "Loader ($9300) ran: %d steps, echo writes during load: %d\n", steps, echo_write_count);
-    fprintf(stderr, "  $EC0B (last successful candidate low byte, 0 if none): $%02X\n", mem[0xEC0B]);
-    fprintf(stderr, "  $F48F (install-success flag): $%02X\n", mem[0xF48F]);
+    VLOG("Loader ($9300) ran: %d steps, echo writes during load: %d\n", steps, echo_write_count);
+    VLOG("  $EC0B (last successful candidate low byte, 0 if none): $%02X\n", mem[0xEC0B]);
+    VLOG("  $F48F (install-success flag): $%02X\n", mem[0xF48F]);
 
     for (long i = 0; i < tlen; i++) {
         uint8_t ch = text[i] | 0x80;
@@ -201,10 +189,13 @@ int main(int argc, char **argv) {
         if (s >= 5000000) {
             fprintf(stderr, "WARNING: char #%ld ($%02X) hit step budget -- may be incomplete\n", i, ch);
         }
-        fprintf(stderr, "\rchar %ld/%ld ($%02X), audio=%.3fs   ", i + 1, tlen, ch, audio_count / CHIP_HZ);
-        fflush(stderr);
+        if (g_ropts.verbose) {
+            fprintf(stderr, "\rchar %ld/%ld ($%02X), audio=%.3fs   ",
+                    i + 1, tlen, ch, audio_count / CHIP_HZ);
+            fflush(stderr);
+        }
     }
-    fprintf(stderr, "\n");
+    VLOG("\n");
 
     int idle_guard = 0;
     while (tms5220_talk_status(&tms) && idle_guard < 500000) {
@@ -212,9 +203,6 @@ int main(int argc, char **argv) {
         idle_guard++;
     }
 
-    fprintf(stderr, "Total audio: %zu samples, %.3f seconds at %.0f Hz\n",
-            audio_count, audio_count / CHIP_HZ, CHIP_HZ);
-    wav_write(argv[4], (uint32_t)CHIP_HZ, audio, audio_count);
-    fprintf(stderr, "Wrote %s\n", argv[4]);
+    render_finish(&g_ropts, in_path, out_path, tlen, (uint32_t)CHIP_HZ, audio, audio_count);
     return 0;
 }

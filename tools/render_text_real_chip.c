@@ -1,17 +1,32 @@
 /*
- * render_text_real_chip.c
+ * render_text_real_chip.c -- SUPERSEDED, kept for comparison only.
  *
- * General-purpose version of render_hi_real_chip.c: reads an arbitrary
- * byte stream from a file (the literal bytes Applesoft would have sent
- * to COUT -- Echo/Textalker control codes and text, high bit NOT set)
- * and renders it through the real 6502 + real ported TMS5220 pipeline,
- * writing 8kHz mono PCM to a WAV file.
+ * Use tools/render_text_loader.c instead. This harness boots Textalker
+ * v3.1.3 the short way -- calling $D003 and $FCD6 directly and skipping
+ * the real loader -- which was how the project ran from session 3 to
+ * session 10. It produces correct speech, but it is the configuration
+ * that exhibits the onset glitch (notes/onset_glitch_investigation_
+ * reverted.md), and booting via the real loader is now confirmed to
+ * fix that. It also has to hand-write approximations of code the real
+ * loader installs at $BA83/$BA88, and stubs "monitor ROM" addresses
+ * straight over Textalker's own image because it does not model
+ * language-card banking.
+ *
+ * Retained because a known-different second implementation is useful
+ * for A/B comparison, and because the reference sample counts recorded
+ * throughout notes/ were produced by it.
+ *
+ * Reads an arbitrary byte stream from a file (the literal bytes
+ * Applesoft would have sent to COUT -- Echo/Textalker control codes and
+ * text, high bit NOT set) and renders it through the real 6502 + real
+ * ported TMS5220 pipeline, writing 8kHz mono PCM to a WAV file.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include "tms5220_core.h"
+#include "render_common.h"
 
 extern uint16_t pc;
 extern uint8_t sp, a, x, y, status;
@@ -123,35 +138,22 @@ static int run_to_halt(uint16_t entry, int max_steps, uint16_t halt_addr,
     return steps;
 }
 
-static void wav_write(const char *path, uint32_t rate, const int16_t *pcm, size_t n) {
-    FILE *f = fopen(path, "wb");
-    uint32_t data_bytes = (uint32_t)(n * 2);
-    uint32_t byte_rate = rate * 2;
-    uint16_t block_align = 2, bits = 16, fmt = 1, ch = 1;
-    uint32_t fmt_size = 16, riff_size = 36 + data_bytes;
-    fwrite("RIFF", 1, 4, f); fwrite(&riff_size, 4, 1, f); fwrite("WAVE", 1, 4, f);
-    fwrite("fmt ", 1, 4, f); fwrite(&fmt_size, 4, 1, f);
-    fwrite(&fmt, 2, 1, f); fwrite(&ch, 2, 1, f);
-    fwrite(&rate, 4, 1, f); fwrite(&byte_rate, 4, 1, f);
-    fwrite(&block_align, 2, 1, f); fwrite(&bits, 2, 1, f);
-    fwrite("data", 1, 4, f); fwrite(&data_bytes, 4, 1, f);
-    fwrite(pcm, 2, n, f);
-    fclose(f);
-}
-
 int main(int argc, char **argv) {
-    if (argc < 4) {
-        fprintf(stderr, "usage: %s <textalker.obj> <input bytes file> <output.wav>\n", argv[0]);
+    if (render_parse_args(argc, argv, 3,
+                          "<textalker.obj> <input bytes file> <output.wav>",
+                          &g_ropts))
         return 1;
-    }
-    FILE *f = fopen(argv[1], "rb");
-    if (!f) { perror("open obj"); return 1; }
+    const char *obj_path = g_ropts.pos[0];
+    const char *in_path  = g_ropts.pos[1], *out_path = g_ropts.pos[2];
+
+    FILE *f = fopen(obj_path, "rb");
+    if (!f) { perror(obj_path); return 1; }
     size_t n = fread(mem + 0xD000, 1, 0x3000, f);
     fclose(f);
-    fprintf(stderr, "Loaded %zu bytes of TEXTALKER.OBJ at $D000\n", n);
+    VLOG("Loaded %zu bytes of TEXTALKER.OBJ at $D000\n", n);
 
-    FILE *tf = fopen(argv[2], "rb");
-    if (!tf) { perror("open text"); return 1; }
+    FILE *tf = fopen(in_path, "rb");
+    if (!tf) { perror(in_path); return 1; }
     fseek(tf, 0, SEEK_END);
     long tlen = ftell(tf);
     fseek(tf, 0, SEEK_SET);
@@ -178,10 +180,12 @@ int main(int argc, char **argv) {
     sp = 0xFD;
 
     int steps = run_to_halt(0xD003, 20000, 0x0200, 1, 0x00);
-    fprintf(stderr, "Init via $D003: %d steps\n", steps);
+    VLOG("Init via $D003: %d steps\n", steps);
     steps = run_to_halt(0xFCD6, 20000, 0x0202, 0, 0);
-    fprintf(stderr, "Init via $FCD6: %d steps (card detection %s -- FD87=%02X)\n",
-            steps, mem[0xFD87] == 0x1F ? "SUCCEEDED" : "FAILED", mem[0xFD87]);
+    VLOG("Init via $FCD6: %d steps (card detection %s -- FD87=%02X)\n",
+         steps, mem[0xFD87] == 0x1F ? "SUCCEEDED" : "FAILED", mem[0xFD87]);
+    if (mem[0xFD87] != 0x1F)
+        fprintf(stderr, "WARNING: card detection did not succeed (FD87=$%02X)\n", mem[0xFD87]);
 
     for (long i = 0; i < tlen; i++) {
         uint8_t ch = text[i] | 0x80;
@@ -190,10 +194,13 @@ int main(int argc, char **argv) {
         if (s >= 5000000) {
             fprintf(stderr, "WARNING: char #%ld ($%02X) hit step budget -- may be incomplete\n", i, ch);
         }
-        fprintf(stderr, "\rchar %ld/%ld ($%02X), audio=%.3fs   ", i + 1, tlen, ch, audio_count / CHIP_HZ);
-        fflush(stderr);
+        if (g_ropts.verbose) {
+            fprintf(stderr, "\rchar %ld/%ld ($%02X), audio=%.3fs   ",
+                    i + 1, tlen, ch, audio_count / CHIP_HZ);
+            fflush(stderr);
+        }
     }
-    fprintf(stderr, "\n");
+    VLOG("\n");
 
     int idle_guard = 0;
     while (tms5220_talk_status(&tms) && idle_guard < 500000) {
@@ -201,10 +208,6 @@ int main(int argc, char **argv) {
         idle_guard++;
     }
 
-    fprintf(stderr, "Total audio: %zu samples, %.3f seconds at %.0f Hz\n",
-            audio_count, audio_count / CHIP_HZ, CHIP_HZ);
-
-    wav_write(argv[3], (uint32_t)CHIP_HZ, audio, audio_count);
-    fprintf(stderr, "Wrote %s\n", argv[3]);
+    render_finish(&g_ropts, in_path, out_path, tlen, (uint32_t)CHIP_HZ, audio, audio_count);
     return 0;
 }

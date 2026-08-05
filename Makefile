@@ -43,18 +43,21 @@
 # which ship with Windows itself) -- verified by inspecting import
 # tables and by actually running both builds under Wine.
 
-CFLAGS_COMMON = -Wall -O2 -Ithird_party/tms5220_core
-SOURCES = tools/render_text_real_chip.c \
-          third_party/fake6502/fake6502.c \
-          third_party/tms5220_core/tms5220_core.c \
-          third_party/tms5220_core/tms5220_reset.c
+CFLAGS_COMMON = -Wall -O2 -Ithird_party/tms5220_core -Itools
 
-SOURCES_V13 = tools/render_v13.c \
-              third_party/fake6502/fake6502.c \
+EMU_SOURCES = third_party/fake6502/fake6502.c \
               third_party/tms5220_core/tms5220_core.c \
               third_party/tms5220_core/tms5220_reset.c
 
+# The canonical v3.1.3 harness: boots via Textalker's own loader.
+SOURCES_LOADER = tools/render_text_loader.c $(EMU_SOURCES)
+# Superseded direct-init harness ($D003/$FCD6, no loader), kept for A/B
+# comparison -- this is the one that shows the onset glitch.
+SOURCES = tools/render_text_real_chip.c $(EMU_SOURCES)
+SOURCES_V13 = tools/render_v13.c $(EMU_SOURCES)
+
 SOURCES_RESAMPLE = tools/resample_wav.c
+SOURCES_WAVSTATS = tools/wav_stats.c
 
 CC_NATIVE ?= gcc
 
@@ -100,7 +103,11 @@ BUILD_DIR = build
 
 all: native
 
-native: $(BUILD_DIR)/native/render_text_real_chip $(BUILD_DIR)/native/render_v13 $(BUILD_DIR)/native/resample_wav
+native: $(BUILD_DIR)/native/render_text_loader \
+        $(BUILD_DIR)/native/render_text_real_chip \
+        $(BUILD_DIR)/native/render_v13 \
+        $(BUILD_DIR)/native/resample_wav \
+        $(BUILD_DIR)/native/wav_stats
 
 # A MinGW gcc loads its own support DLLs (libgcc, libisl, libmpc, ...)
 # from its own bin directory by way of PATH. If you invoke one MSYS2
@@ -121,16 +128,20 @@ WIN32_PATH = $(if $(findstring /,$(CC_WIN32)),$(dir $(CC_WIN32)):,)$$PATH
 
 win64: check-mingw64
 	mkdir -p $(BUILD_DIR)/win64
+	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/render_text_loader.exe $(SOURCES_LOADER)
 	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/render_text_real_chip.exe $(SOURCES)
 	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/render_v13.exe $(SOURCES_V13)
 	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/resample_wav.exe $(SOURCES_RESAMPLE)
+	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/wav_stats.exe $(SOURCES_WAVSTATS)
 	@echo "win64 build complete: $(BUILD_DIR)/win64/"
 
 win32: check-mingw32
 	mkdir -p $(BUILD_DIR)/win32
+	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/render_text_loader.exe $(SOURCES_LOADER)
 	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/render_text_real_chip.exe $(SOURCES)
 	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/render_v13.exe $(SOURCES_V13)
 	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/resample_wav.exe $(SOURCES_RESAMPLE)
+	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/wav_stats.exe $(SOURCES_WAVSTATS)
 	@echo "win32 build complete: $(BUILD_DIR)/win32/"
 
 windows: win64 win32
@@ -176,17 +187,25 @@ check-mingw32:
 	      exit 1 ;; \
 	 esac
 
-$(BUILD_DIR)/native/render_text_real_chip: $(SOURCES)
+$(BUILD_DIR)/native/render_text_loader: $(SOURCES_LOADER) tools/render_common.h
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_LOADER)
+
+$(BUILD_DIR)/native/render_text_real_chip: $(SOURCES) tools/render_common.h
 	mkdir -p $(BUILD_DIR)/native
 	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES)
 
-$(BUILD_DIR)/native/render_v13: $(SOURCES_V13)
+$(BUILD_DIR)/native/render_v13: $(SOURCES_V13) tools/render_common.h
 	mkdir -p $(BUILD_DIR)/native
 	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_V13)
 
 $(BUILD_DIR)/native/resample_wav: $(SOURCES_RESAMPLE)
 	mkdir -p $(BUILD_DIR)/native
 	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_RESAMPLE)
+
+$(BUILD_DIR)/native/wav_stats: $(SOURCES_WAVSTATS)
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_WAVSTATS)
 
 clean:
 	rm -rf $(BUILD_DIR)

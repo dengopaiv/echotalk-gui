@@ -1,9 +1,13 @@
 /*
- * render_text_loader.c
+ * render_text_loader.c -- THE CANONICAL TEXTALKER v3.1.3 HARNESS.
  *
- * Variant of render_text_real_chip.c that boots Textalker v3.1.3 by
- * running its REAL loader (roms/textalker.ram.bin at $9300) instead of
- * calling $D003/$FCD6 directly.
+ * Boots Textalker v3.1.3 by running its REAL loader
+ * (roms/textalker.ram.bin at $9300), rather than calling $D003/$FCD6
+ * directly the way tools/render_text_real_chip.c does.
+ *
+ * Use this one. The direct-init harness is kept only for comparison:
+ * this approach was confirmed by ear (session 10) to fix the onset
+ * glitch that had been open since session 9, in every case tested.
  *
  * Why this exists (session 10):
  *
@@ -37,6 +41,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "tms5220_core.h"
+#include "render_common.h"
 
 extern uint16_t pc;
 extern uint8_t sp, a, x, y, status;
@@ -177,43 +182,28 @@ static int run_to_halt(uint16_t entry, int max_steps, uint16_t halt_addr,
     return steps;
 }
 
-static void wav_write(const char *path, uint32_t rate, const int16_t *pcm, size_t n) {
-    FILE *f = fopen(path, "wb");
-    uint32_t data_bytes = (uint32_t)(n * 2);
-    uint32_t byte_rate = rate * 2;
-    uint16_t block_align = 2, bits = 16, fmt = 1, ch = 1;
-    uint32_t fmt_size = 16, riff_size = 36 + data_bytes;
-    fwrite("RIFF", 1, 4, f); fwrite(&riff_size, 4, 1, f); fwrite("WAVE", 1, 4, f);
-    fwrite("fmt ", 1, 4, f); fwrite(&fmt_size, 4, 1, f);
-    fwrite(&fmt, 2, 1, f); fwrite(&ch, 2, 1, f);
-    fwrite(&rate, 4, 1, f); fwrite(&byte_rate, 4, 1, f);
-    fwrite(&block_align, 2, 1, f); fwrite(&bits, 2, 1, f);
-    fwrite("data", 1, 4, f); fwrite(&data_bytes, 4, 1, f);
-    fwrite(pcm, 2, n, f);
-    fclose(f);
-}
-
 int main(int argc, char **argv) {
-    if (argc < 5) {
-        fprintf(stderr, "usage: %s <textalker.ram.bin> <textalker.obj.bin> <input bytes file> <output.wav>\n",
-                argv[0]);
+    if (render_parse_args(argc, argv, 4,
+                          "<textalker.ram.bin> <textalker.obj.bin> <input bytes file> <output.wav>",
+                          &g_ropts))
         return 1;
-    }
+    const char *ram_path = g_ropts.pos[0], *obj_path = g_ropts.pos[1];
+    const char *in_path  = g_ropts.pos[2], *out_path = g_ropts.pos[3];
 
-    FILE *fo = fopen(argv[2], "rb");
-    if (!fo) { perror("open obj"); return 1; }
+    FILE *fo = fopen(obj_path, "rb");
+    if (!fo) { perror(obj_path); return 1; }
     size_t no = fread(mem + 0xD000, 1, 0x3000, fo);
     fclose(fo);
-    fprintf(stderr, "Loaded %zu bytes of TEXTALKER.OBJ at $D000\n", no);
+    VLOG("Loaded %zu bytes of TEXTALKER.OBJ at $D000\n", no);
 
-    FILE *fr = fopen(argv[1], "rb");
-    if (!fr) { perror("open ram loader"); return 1; }
+    FILE *fr = fopen(ram_path, "rb");
+    if (!fr) { perror(ram_path); return 1; }
     size_t nr = fread(mem + 0x9300, 1, 0x300, fr);
     fclose(fr);
-    fprintf(stderr, "Loaded %zu bytes of TEXTALKER.RAM (loader) at $9300\n", nr);
+    VLOG("Loaded %zu bytes of TEXTALKER.RAM (loader) at $9300\n", nr);
 
-    FILE *tf = fopen(argv[3], "rb");
-    if (!tf) { perror("open text"); return 1; }
+    FILE *tf = fopen(in_path, "rb");
+    if (!tf) { perror(in_path); return 1; }
     fseek(tf, 0, SEEK_END);
     long tlen = ftell(tf);
     fseek(tf, 0, SEEK_SET);
@@ -282,15 +272,20 @@ int main(int argc, char **argv) {
 
     uint8_t ba83_before = mem[0xBA83];
     int steps = run_to_halt(0x9300, 2000000, 0x0200, 0, 0);
-    fprintf(stderr, "Loader ($9300) ran: %d steps, echo writes during load: %d\n",
-            steps, echo_write_count);
-    fprintf(stderr, "  $36/$37 (CSWL output vector) = $%02X%02X\n", mem[0x0037], mem[0x0036]);
-    fprintf(stderr, "  $BA7C region (was $BA83=%02X):", ba83_before);
-    for (uint16_t addr = 0xBA7C; addr <= 0xBA92; addr++)
-        fprintf(stderr, " %02X", mem[addr]);
-    fprintf(stderr, "\n");
-    fprintf(stderr, "  $FD87 (card detection) = $%02X %s\n",
-            mem[0xFD87], mem[0xFD87] == 0x1F ? "(SUCCEEDED)" : "(not set by loader)");
+    VLOG("Loader ($9300) ran: %d steps, echo writes during load: %d\n",
+         steps, echo_write_count);
+    VLOG("  $36/$37 (CSWL output vector) = $%02X%02X\n", mem[0x0037], mem[0x0036]);
+    if (g_ropts.verbose) {
+        fprintf(stderr, "  $BA7C region (was $BA83=%02X):", ba83_before);
+        for (uint16_t addr = 0xBA7C; addr <= 0xBA92; addr++)
+            fprintf(stderr, " %02X", mem[addr]);
+        fprintf(stderr, "\n");
+    }
+    VLOG("  $FD87 (card detection) = $%02X %s\n",
+         mem[0xFD87], mem[0xFD87] == 0x1F ? "(SUCCEEDED)" : "(not set by loader)");
+    /* Always worth knowing: if detection failed the audio is garbage. */
+    if (mem[0xFD87] != 0x1F)
+        fprintf(stderr, "WARNING: card detection did not succeed (FD87=$%02X)\n", mem[0xFD87]);
 
     /* The loader normally installs a trampoline at $BA7C ending in
      * JMP $D006. If it left $BA83/$BA88 untouched, fall back to the
@@ -306,8 +301,8 @@ int main(int argc, char **argv) {
      * possible. */
     if (mem[0xFD87] != 0x1F) {
         int s2 = run_to_halt(0xFCD6, 20000, 0x0202, 0, 0);
-        fprintf(stderr, "Ran $FCD6 explicitly: %d steps (card detection %s -- FD87=%02X)\n",
-                s2, mem[0xFD87] == 0x1F ? "SUCCEEDED" : "FAILED", mem[0xFD87]);
+        VLOG("Ran $FCD6 explicitly: %d steps (card detection %s -- FD87=%02X)\n",
+             s2, mem[0xFD87] == 0x1F ? "SUCCEEDED" : "FAILED", mem[0xFD87]);
     }
 
     /* Feed characters through the trampoline the loader actually
@@ -325,10 +320,13 @@ int main(int argc, char **argv) {
         if (s >= 5000000) {
             fprintf(stderr, "WARNING: char #%ld ($%02X) hit step budget -- may be incomplete\n", i, ch);
         }
-        fprintf(stderr, "\rchar %ld/%ld ($%02X), audio=%.3fs   ", i + 1, tlen, ch, audio_count / CHIP_HZ);
-        fflush(stderr);
+        if (g_ropts.verbose) {
+            fprintf(stderr, "\rchar %ld/%ld ($%02X), audio=%.3fs   ",
+                    i + 1, tlen, ch, audio_count / CHIP_HZ);
+            fflush(stderr);
+        }
     }
-    fprintf(stderr, "\n");
+    VLOG("\n");
 
     int idle_guard = 0;
     while (tms5220_talk_status(&tms) && idle_guard < 500000) {
@@ -336,9 +334,6 @@ int main(int argc, char **argv) {
         idle_guard++;
     }
 
-    fprintf(stderr, "Total audio: %zu samples, %.3f seconds at %.0f Hz\n",
-            audio_count, audio_count / CHIP_HZ, CHIP_HZ);
-    wav_write(argv[4], (uint32_t)CHIP_HZ, audio, audio_count);
-    fprintf(stderr, "Wrote %s\n", argv[4]);
+    render_finish(&g_ropts, in_path, out_path, tlen, (uint32_t)CHIP_HZ, audio, audio_count);
     return 0;
 }
