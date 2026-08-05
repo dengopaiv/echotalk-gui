@@ -77,6 +77,47 @@ behavior depended on anywhere -- but "should be low-risk" isn't the
 same as verified, and it's worth actually running `make win64` from a
 real UCRT64 shell once one is available, as a final check.
 
+## UPDATE (session 10): both caveats above now closed on real Windows
+
+The two open items -- "UCRT was never directly tested" and "win32 needs
+the MinGW32 shell, untried" -- were both resolved by building on the
+user's actual Windows machine (MSYS2 at `S:\msys`, gcc 15.2.0), not
+under cross-compilation or Wine.
+
+**win64 / UCRT64** (`S:\msys\ucrt64\bin\gcc.exe`):
+- Compiles clean; the only warning is the same pre-existing
+  `unused variable 'err'` in `tms5220_lattice_filter` that the Linux
+  build also emits. Nothing UCRT-specific surfaced.
+- Import table is `KERNEL32.dll` plus the `api-ms-win-crt-*` UCRT
+  forwarder DLLs -- i.e. it really is linking UCRT rather than MSVCRT,
+  which is what was never confirmed before. No MinGW runtime DLLs.
+- `hi_only.bin` renders to 2811 samples, amplitude -12127/+26833 --
+  exact match to the validated baseline.
+
+**win32 / MinGW32** (`S:\msys\mingw32\bin\gcc.exe`, installed via
+`pacman -S mingw-w64-i686-gcc`):
+- All three tools build clean and static.
+- Import table is exactly `KERNEL32.dll` + `msvcrt.dll` -- the older
+  runtime that ships with every Windows version, which is the point of
+  using MinGW32 for the 32-bit build.
+- `render_text_real_chip`: 2811 samples, -12127/+26833. `render_v13`:
+  loader ran 551888 steps (matching the documented v1.3 calibration
+  figure exactly) and 13210 samples. Both exact matches.
+
+So the MSVCRT-vs-UCRT question is settled empirically: identical output
+from both runtimes, and the 32-bit MSVCRT build is the one to prefer for
+distribution breadth.
+
+### One trap worth knowing about
+The Makefile auto-detects the compiler as `$(if $(MSYSTEM),gcc,...)`.
+That is correct when you run `make win32` from the **MinGW32** shell,
+but if you run `make win32` from the **UCRT64** shell it will silently
+use UCRT64's `gcc` and produce a *64-bit* binary in `build/win32/`.
+`check-mingw32` won't catch this, because `which gcc` succeeds either
+way. Until that's hardened, check which shell you're in, or pass the
+compiler explicitly:
+`make win32 CC_WIN32=/s/msys/mingw32/bin/gcc`
+
 ## What's NOT here yet
 This builds the existing *test/diagnostic tools*, which speak text
 from a file to a WAV file -- useful for continued validation, but not
