@@ -104,6 +104,7 @@ static double tick_accumulator = 0.0;
  * 15 = stop frame). */
 static int chip_trace = 0;
 static unsigned long frames_played = 0;
+static int resetl4_trace = 0;
 static void trace_chip_state(void) {
     static int first = 1;
     static int p_talkd, p_empty, p_energy, p_spen, p_ddis, p_talk;
@@ -130,12 +131,29 @@ static void tick_chip(uint32_t elapsed_cpu_cycles) {
     while (tick_accumulator >= CYCLES_PER_SAMPLE) {
         int16_t sample;
         static int prev_ip = -1, prev_talkd = -1;
+        /* Capture pre-call state so a RESETL4 can be reported in exactly
+         * MAME's format: its "about to update status" line is the state
+         * on entry, "status updated" the state after the TALKD latch and
+         * the conditional TALK set. Detecting it from outside the core
+         * (an IP 7->0 wrap from PC=12) keeps the ported code untouched. */
+        int b_ip = tms.m_IP, b_pc = tms.m_PC, b_sub = tms.m_subcycle;
+        int b_spen = tms.m_SPEN, b_talk = tms.m_TALK, b_talkd = tms.m_TALKD;
+
         tms5220_process(&tms, &sample, 1);
-        /* Count frame boundaries the same way MAME's log does: one per
-         * IP wrap (7 -> 0) while the chip is speaking. Directly
-         * comparable with MAME's "RESETL4, status updated" line count. */
-        if (prev_ip == 7 && tms.m_IP == 0 && prev_talkd) frames_played++;
+
+        if (b_ip == 7 && b_pc == 12 && tms.m_IP == 0) {
+            if (b_talkd) frames_played++;
+            if (resetl4_trace) {
+                fprintf(stderr,
+                    "RESETL4, about to update status: IP=%d, PC=%d, subcycle=%d, m_SPEN=%d, m_TALK=%d, m_TALKD=%d\n",
+                    b_ip, b_pc, b_sub, b_spen, b_talk, b_talkd);
+                fprintf(stderr,
+                    "RESETL4, status updated: t=%.2fms IP=%d, PC=%d, subcycle=%d, m_SPEN=%d, m_TALK=%d, m_TALKD=%d\n",
+                    audio_count/8.0, b_ip, b_pc, b_sub, tms.m_SPEN, tms.m_TALK, tms.m_TALKD);
+            }
+        }
         prev_ip = tms.m_IP; prev_talkd = tms.m_TALKD;
+        (void)prev_ip; (void)prev_talkd;
         /* TALKD distinguishes silence the chip is playing (a real pause)
          * from the chip sitting idle while the 6502 thinks (dead air). */
         render_audio_push(sample, tms.m_TALKD);
@@ -146,9 +164,16 @@ static void tick_chip(uint32_t elapsed_cpu_cycles) {
 
 static int echo_write_count = 0;
 
+/* Which PC reads the status port, and how often (ECHOTALK_POLL_TRACE).
+ * A polling loop shows up as one address with an enormous count; the
+ * instruction there says which status bit Textalker is waiting on. */
+static unsigned long poll_pc_count[0x10000];
+static int poll_trace = 0;
+
 uint8_t read6502(uint16_t address) {
     if (address >= 0xC0A0 && address <= 0xC0AF) {
         uint8_t retval;
+        if (poll_trace) poll_pc_count[pc]++;
         if (!readlatch_flag) retval = 0x1f | tms5220_status_r(&tms);
         else retval = 0xff;
         readlatch_flag = !readlatch_flag;
@@ -253,6 +278,8 @@ int main(int argc, char **argv) {
 
     bank_trace = getenv("ECHOTALK_BANK_TRACE") != NULL;
     chip_trace = getenv("ECHOTALK_CHIP_TRACE") != NULL;
+    resetl4_trace = getenv("ECHOTALK_RESETL4") != NULL;
+    poll_trace = getenv("ECHOTALK_POLL_TRACE") != NULL;
     { const char *bd = getenv("ECHOTALK_BYTE_DUMP");
       if (bd) byte_dump = fopen(bd, "w"); }
     { const char *w = getenv("ECHOTALK_PC_WATCH"); if (w) pc_watch = (uint16_t)strtol(w, NULL, 16); }
@@ -262,6 +289,18 @@ int main(int argc, char **argv) {
                         hz, cycles_per_sample); } }
 
     tms5220_reset(&tms, TMS5220_IS_5220);
+
+    /* Experiment (ECHOTALK_PHASE=N): advance the chip's internal frame
+     * counters by N samples before anything else runs, shifting the
+     * phase of its frame clock relative to the 6502 without changing
+     * either clock's rate. A restart costs one idle frame or two purely
+     * according to whether SPEN is set before or after the RESETL4 that
+     * clears TALKD, so if we are landing on the wrong side of that
+     * boundary, some phase offset should flip it. */
+    { const char *ph = getenv("ECHOTALK_PHASE");
+      if (ph) { int n = atoi(ph); int16_t junk;
+                for (int i = 0; i < n; i++) tms5220_process(&tms, &junk, 1); } }
+
     install_wild_jump_trap();
 
     /* The stand-in monitor ROM: every address returns immediately. We
@@ -418,7 +457,13 @@ int main(int argc, char **argv) {
         idle_guard++;
     }
 
-    fprintf(stderr, "  frames played: %lu\\n", frames_played);
+    fprintf(stderr, "  frames played: %lu\n", frames_played);
+    if (poll_trace) {
+        for (int i = 0; i < 0x10000; i++)
+            if (poll_pc_count[i] > 20)
+                fprintf(stderr, "  status-port reads from PC=$%04X: %lu\n",
+                        i, poll_pc_count[i]);
+    }
     render_finish(&g_ropts, in_path, out_path, tlen, (uint32_t)CHIP_HZ);
     return 0;
 }

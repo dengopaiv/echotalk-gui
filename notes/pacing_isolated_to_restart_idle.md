@@ -88,14 +88,73 @@ frame. MAME's log shows a very similar 8.6 ms delay, which is the part
 that does not yet add up: the same relative timing should cost it the
 same extra frame, yet its totals say otherwise.
 
-## Next step
+## Frame-by-frame RESETL4 comparison: states match, counts do not
 
-Resolve that last point directly rather than by arithmetic: instrument
-our core to log SPEN/TALK/TALKD at every RESETL4 in exactly MAME's
-format, run the same phrase, and diff the two sequences frame by frame.
-The first frame where the state pair diverges is the bug. Everything
-else has been eliminated -- same bytes in, same frames out, so the fault
-is in when the restart handshake lands relative to the frame clock.
+Done. `ECHOTALK_RESETL4=1` emits RESETL4 records in MAME's exact format,
+detected from outside the core (an IP 7->0 wrap from PC=12), with the
+pre-call state as "about to update" and the post-call state as "status
+updated". Filtering ours to MAME's logging condition (TALKD set on
+entry) and diffing:
+
+**All 49 records are identical.** Ours has one extra at the very end,
+which is the final shutdown, outside the line range extracted from
+MAME's log. So the state machine takes the same transitions in the same
+order, with the same SPEN/TALK/TALKD values throughout.
+
+What differs is only how many *idle* frames sit between those records:
+
+| | ours | MAME |
+|---|---|---|
+| gaps of 1 idle frame | 0 | **7** |
+| gaps of 2 idle frames | **7** | 0 |
+
+(Ours also shows one 4-frame and one 7-frame gap, which are startup and
+shutdown, not restarts.)
+
+That is the entire bug, stated exactly: **every restart costs us two
+idle frames where it costs MAME one.** Seven restarts, 25 ms each, and
+the arithmetic closes.
+
+## What has been ruled out since
+
+- **Frame-clock phase.** `ECHOTALK_PHASE=N` advances the chip's internal
+  counters by N samples before anything else runs, shifting the frame
+  clock relative to the 6502 without changing either rate. Swept across
+  a full frame (0, 25, 50 ... 199): **13735 samples at every offset**,
+  not one sample of difference. The extra frame is structural, not a
+  quantisation accident -- unsurprising in hindsight, since Textalker
+  waits on chip state and the whole system re-synchronises.
+- **FIFO handling on SPEAK EXTERNAL.** Both implementations clear the
+  FIFO and its counters on the command, verified line by line. The six
+  residual bytes left over from the previous segment are discarded in
+  both, so neither gets a head start toward the buffer-low threshold.
+- **talk_status.** Identical: `m_SPEN || m_TALKD` in both.
+
+## Where it must be
+
+`TALK` is only set at a RESETL4 where `SPEN` is already true, and `TALKD`
+follows `TALK` one frame later. So a restart costs one idle frame if
+`SPEN` is set *before* the RESETL4 that clears `TALKD`, and two if it is
+set after. MAME manages the former; we manage the latter. Since the byte
+stream is identical, the difference is when those bytes reach the FIFO
+relative to the frame clock -- and phase has been eliminated, so
+something makes our 6502 reach the write later in a way that is stable
+rather than accidental.
+
+Textalker's status polling was located: a helper at `$FCC9` reading the
+(self-modified) status port twice with six `ROR A` instructions of delay
+between, called 21,558 times in this render. Its callers are the loop
+that waits between segments. Reading that routine's callers to find
+which status bit gates the next segment's first write is the next step,
+since that is what determines which side of the boundary `SPEN` lands
+on.
+
+One candidate not yet tested: MAME runs the chip in true-timing mode,
+where `status_r()` returns `m_read_latch` -- a value latched when /RS
+last fell and refreshed continuously while it is held low -- whereas our
+port returns the instantaneous status. If Textalker's poll sees a value
+one read-cycle stale in MAME, the loop could exit on a different
+iteration and reach the write earlier relative to the frame clock.
 
 ## Tooling added
 - `ECHOTALK_BYTE_DUMP=<file>` -- every byte written to the Echo II latch,
