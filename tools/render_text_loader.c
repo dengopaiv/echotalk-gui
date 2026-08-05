@@ -460,7 +460,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "  frames played: %lu\n", frames_played);
     if (poll_trace) {
         for (int i = 0; i < 0x10000; i++)
-            if (poll_pc_count[i] > 20)
+            if (poll_pc_count[i] > 0)
                 fprintf(stderr, "  status-port reads from PC=$%04X: %lu\n",
                         i, poll_pc_count[i]);
     }

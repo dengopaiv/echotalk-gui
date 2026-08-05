@@ -156,6 +156,98 @@ port returns the instantaneous status. If Textalker's poll sees a value
 one read-cycle stale in MAME, the loop could exit on a different
 iteration and reach the write earlier relative to the frame clock.
 
+---
+
+# CORRECTION: the "one idle frame vs two" result does not hold up
+
+Investigating the above turned up a measurement error in the section
+above it, which is retained only so the reasoning can be followed.
+
+## The log's sample accounting is not a reliable clock
+
+Durations above were obtained by summing MAME's `process called with
+size of N` stream updates between two line numbers. That total is
+extremely sensitive to where the region is cut: moving the *expanded*
+utterance's start from line 430 to line 380 changes the sum from 18,275
+samples to 24,111. The accumulator sweeps up large idle stretches either
+side of the utterance, so it cannot be used to time restarts, and the
+"7 gaps x 1 idle frame" figure derived from it is not trustworthy.
+
+## MAME's own event ordering says it takes two idle frames as well
+
+Reading the log in order around a restart, rather than timing it:
+
+```
+halting speech
+RESETL4, status updated: m_SPEN=0, m_TALK=0, m_TALKD=0   <- TALKD drops
+Data written to latch of 60                              <- SPEAK EXTERNAL, after
+Speak External command received (60)
+data_write triggered SPEN to go active!                  <- SPEN, after
+RESETL4, status updated: m_SPEN=1, m_TALK=1, m_TALKD=1   <- speaking again
+```
+
+identical in structure to ours. SPEN is set *after* the RESETL4 that
+clears TALKD, so by the state machine -- TALK only set at a RESETL4
+where SPEN is already true, TALKD following TALK one frame later --
+MAME must also spend two idle frames per restart. It cannot be doing it
+in one while writing SPEAK EXTERNAL that late.
+
+## What is solid
+
+Within strict utterance boundaries, everything measurable matches:
+
+| | ours | MAME |
+|---|---|---|
+| expanded frames | 82 | 82 |
+| compressed frames | 50 | 50 |
+| RESETL4 records | 49 | 49, values identical |
+| byte stream | 324 / 496 | identical |
+| restart ordering | TALKD down, then $60, then SPEN | same |
+
+And our own output is exactly what the state machine predicts:
+
+```
+50 speaking frames x 25 ms          = 1250 ms
+8 restarts x 2 idle frames x 25 ms  =  400 ms
+                                      -------
+                                       1650 ms   (we render 1717 ms
+                                                  including lead-in/tail)
+```
+
+## So the open question has moved
+
+Every direct comparison says the two implementations do the same thing.
+The only evidence that MAME is faster is `mame.wav` at 1414 ms, which
+the user extracted by hand from a longer session recording. For MAME to
+produce that from 50 frames and 8 restarts it would need well under one
+idle frame per restart, which its own log contradicts.
+
+The likeliest explanation is now that **the reference recording is not a
+faithful full-length capture** -- inter-word silence trimmed during
+extraction would produce exactly this. That is a much more mundane
+explanation than a chip-model defect, and it is consistent with every
+measurement that does not depend on that file.
+
+## How to settle it
+
+Have MAME write the audio itself rather than extracting it from a
+session capture:
+
+```
+mame.exe apple2e -wavwrite rubber.wav <the rest of the usual options>
+```
+
+`-wavwrite` records MAME's own audio output stream unedited. Comparing
+that against `out/final.wav` (ours, 1717 ms) answers it in one step:
+
+- If MAME's own capture is also ~1650-1700 ms, there is no pacing bug
+  left to fix -- our output already matches, and the original
+  "sluggishness" was an artifact of the hand-extracted reference.
+- If it really is ~1414 ms, then MAME is genuinely resuming speech
+  faster than its own log ordering can account for, and the next place
+  to look is the true-timing status latch described above, since that
+  is the last structural difference between the two chip models.
+
 ## Tooling added
 - `ECHOTALK_BYTE_DUMP=<file>` -- every byte written to the Echo II latch,
   in MAME's hex format.
