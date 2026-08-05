@@ -7,6 +7,19 @@
 static const uint8_t reload_table[4] = { 0, 2, 4, 6 };
 #define INTERP_SHIFT >> tms->m_coeff->interp_coeff[tms->m_IP]
 
+/* Sets TALK at the same moment SPEN goes active, when the FIFO passes
+ * the buffer-low threshold, rather than waiting for the next RESETL4 to
+ * set it. MAME defines this (tms5220.cpp line 355) and the two
+ * `#ifdef FAST_START_HACK` sites below came across with the port, but
+ * the define itself did not -- so both blocks compiled to nothing and
+ * every restart cost an extra frame.
+ *
+ * That frame is the whole of the "sluggish compressed speech" bug:
+ * TALK waits a RESETL4, TALKD follows TALK a further RESETL4 later, and
+ * speech resumes 25ms late. MAME's own trace shows one idle frame per
+ * restart against our two. See notes/pacing_fast_start_hack.md. */
+#define FAST_START_HACK 1
+
 /* Number of generated samples a pending READ BYTE / READ AND BRANCH
  * command takes to complete before its result becomes visible to a
  * status read.
