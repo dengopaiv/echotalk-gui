@@ -1,4 +1,4 @@
-# EchoTalk build system
+﻿# EchoTalk build system
 #
 # Targets:
 #   make native   -- build for this machine (Linux/Mac), dynamically
@@ -61,6 +61,14 @@ SOURCES_V13 = tools/render_v13.c $(EMU_SOURCES)
 SOURCES_RESAMPLE = tools/resample_wav.c
 SOURCES_WAVSTATS = tools/wav_stats.c
 
+# The library and the tool that drives it. This is the thing anyone
+# else is actually meant to run.
+LIB_SOURCES = src/echotalk.c src/text_prep.c src/chunker.c src/resample.c \
+              third_party/fake6502/fake6502.c \
+              third_party/tms5220_core/tms5220_core.c \
+              third_party/tms5220_core/tms5220_reset.c
+SOURCES_SAY = tools/say.c $(LIB_SOURCES)
+
 # Pure-logic unit tests, no emulator involved.
 SOURCES_TEST_PREP = tools/test_text_prep.c src/text_prep.c
 SOURCES_TEST_CHUNKER = tools/test_chunker.c src/chunker.c
@@ -109,7 +117,8 @@ BUILD_DIR = build
 
 all: native
 
-native: $(BUILD_DIR)/native/render_text_loader \
+native: $(BUILD_DIR)/native/say \
+        $(BUILD_DIR)/native/render_text_loader \
         $(BUILD_DIR)/native/render_text_real_chip \
         $(BUILD_DIR)/native/render_v13 \
         $(BUILD_DIR)/native/resample_wav \
@@ -134,6 +143,7 @@ WIN32_PATH = $(if $(findstring /,$(CC_WIN32)),$(dir $(CC_WIN32)):,)$$PATH
 
 win64: check-mingw64
 	mkdir -p $(BUILD_DIR)/win64
+	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/say.exe $(SOURCES_SAY)
 	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/render_text_loader.exe $(SOURCES_LOADER)
 	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/render_text_real_chip.exe $(SOURCES)
 	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/render_v13.exe $(SOURCES_V13)
@@ -143,6 +153,7 @@ win64: check-mingw64
 
 win32: check-mingw32
 	mkdir -p $(BUILD_DIR)/win32
+	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/say.exe $(SOURCES_SAY)
 	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/render_text_loader.exe $(SOURCES_LOADER)
 	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/render_text_real_chip.exe $(SOURCES)
 	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/render_v13.exe $(SOURCES_V13)
@@ -192,6 +203,10 @@ check-mingw32:
 	      echo "  Override explicitly, e.g. make win32 CC_WIN32=/mingw32/bin/gcc"; \
 	      exit 1 ;; \
 	 esac
+
+$(BUILD_DIR)/native/say: $(SOURCES_SAY) src/echotalk.h
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_SAY)
 
 $(BUILD_DIR)/native/render_text_loader: $(SOURCES_LOADER) tools/render_common.h
 	mkdir -p $(BUILD_DIR)/native
