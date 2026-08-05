@@ -1,4 +1,4 @@
-/*
+﻿/*
  * echotalk.c -- see echotalk.h.
  *
  * This is tools/render_text_loader.c's proven pipeline turned into a
@@ -53,6 +53,7 @@ struct echotalk {
     int frame_rate;
     int compressed;
     int pitch, volume;
+    int word_delay, repeat_filter;
     int settings_dirty;
 
     /* audio queue */
@@ -244,8 +245,7 @@ static int boot(echotalk *et, const char *loader_path, const char *obj_path,
 
     /* Talk-only mode, and disable the repeat-character filter, which
      * otherwise speaks "EEEEEEEEE" as "EE". */
-    send_string(et, "\x05T");
-    send_string(et, "\x05" "99R");
+    send_string(et, "\x05T");   /* talk-only: no screen echo assumed */
 
     /* Everything generated so far is boot noise, and for v1.3 that
      * includes its ~1.37s calibration delay. Discard it: a caller
@@ -274,6 +274,9 @@ echotalk *echotalk_create(const char *loader_path, const char *obj_path,
     et->clock_mult = 1.0;
     et->pitch = 24;
     et->volume = 12;
+    et->word_delay = 0;
+    et->repeat_filter = 99;  /* high enough never to trigger */
+    et->settings_dirty = 1;  /* push defaults before the first utterance */
 
     g_active = et;
     if (boot(et, loader_path, obj_path, errbuf, errbuf_len) != 0) {
@@ -326,14 +329,40 @@ int echotalk_set_volume(echotalk *et, int v) {
     if (v < 0 || v > 15) return -1;
     et->volume = v; et->settings_dirty = 1; return 0;
 }
+int echotalk_set_word_delay(echotalk *et, int d) {
+    if (d < 0 || d > 15) return -1;
+    et->word_delay = d; et->settings_dirty = 1; return 0;
+}
+int echotalk_set_repeat_filter(echotalk *et, int t) {
+    if (t < 0 || t > 99) return -1;
+    et->repeat_filter = t; et->settings_dirty = 1; return 0;
+}
 
 static void apply_settings(echotalk *et) {
     char cmd[16];
     if (!et->settings_dirty) return;
-    snprintf(cmd, sizeof cmd, "\x05%dP", et->pitch);   send_string(et, cmd);
-    snprintf(cmd, sizeof cmd, "\x05%dV", et->volume);  send_string(et, cmd);
+    snprintf(cmd, sizeof cmd, "\x05%dP", et->pitch);         send_string(et, cmd);
+    snprintf(cmd, sizeof cmd, "\x05%dV", et->volume);        send_string(et, cmd);
+    snprintf(cmd, sizeof cmd, "\x05%dD", et->word_delay);    send_string(et, cmd);
+    snprintf(cmd, sizeof cmd, "\x05%dR", et->repeat_filter); send_string(et, cmd);
     send_string(et, et->compressed ? "\x05" "C" : "\x05" "E");
     et->settings_dirty = 0;
+}
+
+/* Sends one utterance and the CR that makes Textalker speak it.
+ *
+ * A single character on its own is almost always meant as a character
+ * rather than a word -- a letter being reviewed, a punctuation mark
+ * being announced -- so it is wrapped in letter mode and
+ * all-punctuation, then set back to word mode and some-punctuation
+ * afterwards. Without this a lone "," is silent and a lone letter can
+ * be read as a word or swallowed by the command dispatcher. */
+static void send_utterance(echotalk *et, const char *s, size_t len) {
+    int single = (len == 1);
+    if (single) send_string(et, "\x05L\x05" "A");
+    for (size_t i = 0; i < len; i++) send_char(et, (uint8_t)s[i]);
+    send_char(et, '\r');
+    if (single) send_string(et, "\x05S\x05W");
 }
 
 int echotalk_speak(echotalk *et, const char *text) {
@@ -363,14 +392,10 @@ int echotalk_speak(echotalk *et, const char *text) {
                      : echotalk_chunk_text(line, line_len, DEFAULT_CHUNK,
                                            chunks, 256);
             if (!n) {
-                for (size_t i = 0; i < line_len; i++) send_char(et, (uint8_t)line[i]);
-                send_char(et, '\r');
+                send_utterance(et, line, line_len);
             } else {
-                for (size_t c = 0; c < n; c++) {
-                    for (size_t i = 0; i < chunks[c].length; i++)
-                        send_char(et, (uint8_t)line[chunks[c].offset + i]);
-                    send_char(et, '\r');
-                }
+                for (size_t c = 0; c < n; c++)
+                    send_utterance(et, line + chunks[c].offset, chunks[c].length);
             }
         }
         if (line_len >= remaining) break;

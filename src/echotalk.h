@@ -84,6 +84,21 @@ int echotalk_set_compressed(echotalk *et, int compressed);
 int echotalk_set_pitch(echotalk *et, int pitch);
 int echotalk_set_volume(echotalk *et, int volume);
 
+/* Pause Textalker inserts between words, 0-15 (default 0).
+ * Textalker 1.3 does not implement this command at all and silently
+ * discards it, so it has no effect there. */
+int echotalk_set_word_delay(echotalk *et, int delay);
+
+/* Threshold for Textalker's repeat-character filter, 0-99.
+ *
+ * The filter exists so a decorative run like "*****" is not read out
+ * one "star" at a time, but it does not distinguish decoration from
+ * content: at its default setting "EEEEEEEEE" is spoken as "EE". The
+ * default here is 99, high enough that it never triggers, which is
+ * almost certainly what a screen reader wants. Lower it to get
+ * Textalker's original behaviour back. */
+int echotalk_set_repeat_filter(echotalk *et, int threshold);
+
 /* --- speaking --- */
 
 /* Synthesises `text` in full and queues the audio for reading.

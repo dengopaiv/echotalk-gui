@@ -1,4 +1,4 @@
-/*
+﻿/*
  * say.c -- drives the library the way a host application would, and is
  * the end-to-end test that the API works.
  *
@@ -30,10 +30,15 @@ int main(int argc, char **argv) {
     unsigned rate = 0;
     double clock_mult = 1.0;
     int frame_rate = 0, compressed = 0, pitch = -1, volume = -1;
+    int word_delay = -1, repeat_filter = -1;
+    const char *text_file = NULL;
     const char *pos[4]; int npos = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--rate") && i + 1 < argc) rate = (unsigned)atoi(argv[++i]);
+        if (!strcmp(argv[i], "--file") && i + 1 < argc) text_file = argv[++i];
+        else if (!strcmp(argv[i], "--word-delay") && i + 1 < argc) word_delay = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--repeat-filter") && i + 1 < argc) repeat_filter = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--rate") && i + 1 < argc) rate = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--clock") && i + 1 < argc) clock_mult = atof(argv[++i]);
         else if (!strcmp(argv[i], "--frame-rate") && i + 1 < argc) frame_rate = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--compressed")) compressed = 1;
@@ -43,17 +48,39 @@ int main(int argc, char **argv) {
             fprintf(stderr, "unknown option %s\n", argv[i]); return 1;
         } else if (npos < 4) pos[npos++] = argv[i];
     }
-    if (npos != 4) {
+    /* With --file the text positional is dropped. */
+    int want = text_file ? 3 : 4;
+    if (npos != want) {
         fprintf(stderr,
-            "usage: %s [options] <loader.bin> <obj.bin> <text> <out.wav>\n"
-            "  --rate HZ         output sample rate (default 8000, native)\n"
-            "  --clock MULT      TMS5220 clock multiplier, speed and pitch\n"
-            "  --frame-rate N    0-3, speed only (1.00x 1.31x 1.89x 3.40x)\n"
-            "  --compressed      Textalker compressed speech\n"
-            "  --pitch N         0-63 (default 24)\n"
-            "  --volume N        0-15 (default 12)\n", argv[0]);
+            "usage: %s [options] <loader.bin> <obj.bin> [text] <out.wav>\n"
+            "  --file PATH        read the text from a file instead of the\n"
+            "                     command line (omit the text argument)\n"
+            "  --rate HZ          output sample rate (default 8000, native)\n"
+            "  --clock MULT       TMS5220 clock multiplier, speed and pitch\n"
+            "  --frame-rate N     0-3, speed only (1.00x 1.31x 1.89x 3.40x)\n"
+            "  --compressed       Textalker compressed speech\n"
+            "  --pitch N          0-63 (default 24)\n"
+            "  --volume N         0-15 (default 12)\n"
+            "  --word-delay N     0-15 pause between words (default 0)\n"
+            "  --repeat-filter N  0-99 repeat-character threshold\n"
+            "                     (default 99, i.e. effectively off)\n", argv[0]);
         return 1;
     }
+
+    char *filetext = NULL;
+    if (text_file) {
+        FILE *tf = fopen(text_file, "rb");
+        if (!tf) { perror(text_file); return 1; }
+        fseek(tf, 0, SEEK_END); long len = ftell(tf); fseek(tf, 0, SEEK_SET);
+        filetext = malloc((size_t)len + 1);
+        if (!filetext || (len && fread(filetext, 1, (size_t)len, tf) != (size_t)len)) {
+            fprintf(stderr, "%s: read failed\n", text_file); fclose(tf); return 1;
+        }
+        filetext[len] = 0;
+        fclose(tf);
+    }
+    const char *text = text_file ? filetext : pos[2];
+    const char *outpath = text_file ? pos[2] : pos[3];
 
     char err[256];
     echotalk *et = echotalk_create(pos[0], pos[1], err, sizeof err);
@@ -67,8 +94,10 @@ int main(int argc, char **argv) {
     echotalk_set_compressed(et, compressed);
     if (pitch >= 0 && echotalk_set_pitch(et, pitch)) fprintf(stderr, "bad --pitch\n");
     if (volume >= 0 && echotalk_set_volume(et, volume)) fprintf(stderr, "bad --volume\n");
+    if (word_delay >= 0 && echotalk_set_word_delay(et, word_delay)) fprintf(stderr, "bad --word-delay\n");
+    if (repeat_filter >= 0 && echotalk_set_repeat_filter(et, repeat_filter)) fprintf(stderr, "bad --repeat-filter\n");
 
-    if (echotalk_speak(et, pos[2]) != 0) {
+    if (echotalk_speak(et, text) != 0) {
         fprintf(stderr, "echotalk_speak failed\n");
         echotalk_destroy(et);
         return 1;
@@ -88,11 +117,11 @@ int main(int argc, char **argv) {
      * multiplier is already baked into the samples by then, so applying
      * it again here would double it. */
     unsigned out_rate = rate ? rate : 8000;
-    wav_write(pos[3], out_rate, pcm, n);
+    wav_write(outpath, out_rate, pcm, n);
     fprintf(stderr, "%zu samples, %.3f s at %u Hz -> %s\n",
-            n, (double)n / out_rate, out_rate, pos[3]);
+            n, (double)n / out_rate, out_rate, outpath);
 
-    free(pcm);
+    free(pcm); free(filetext);
     echotalk_destroy(et);
     return 0;
 }
