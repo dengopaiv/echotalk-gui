@@ -1,0 +1,43 @@
+Disassembly excerpt: $FC80-$FD7F of TEXTALKER.OBJ (org $D000)
+Generated with py65's Disassembler against the raw image.
+Key routines identified:
+
+$FD53  write_byte_to_echo(A):
+  FD53: PHA
+  FD54: LDA $C0A9      ; poll Echo card status latch
+  FD57: AND #$10
+  FD59: BEQ $FD54       ; loop until bit 4 observed set
+  FD5B: PLA
+  FD5C: STA $C0A8       ; latch byte -> TMS5220 data port
+  FD5F: RTS
+
+$FD60  read_echo_status() -> A, carry:
+  FD60: LDA #$00
+  FD62: STA $FFBE
+  FD65: LDA $C0A9
+  FD68: AND #$08
+  FD6A: BNE $FD73
+  FD6C: DEC $FFBE
+  FD6F: BNE $FD65       ; bounded poll loop
+  FD71: CLC
+  FD72: RTS
+  FD73: LDA $C0A8       ; read byte back
+  FD76: SEC
+  FD77: RTS
+
+Confirmed against MAME's a2echoii.cpp: EVERY address $C0A0-$C0AF maps to
+the same latch (offset ignored on the real Echo II). Reads alternate
+between the real TMS5220 status byte (OR'd with 0x1F for the floating
+pull-up bits) and a dummy 0xFF, toggling on each access. Writes latch a
+byte and pulse the chip's /WS pin.
+
+$FCD6-$FD0B looks like a card-presence / speech-ROM signature check:
+writes $0B/$9E to $C0AA/$C0AB (likely a TMS5220 "read from external VSM"
+address setup), then polls for specific returned byte values ($C3, $8D)
+-- worth revisiting when mapping the full init sequence.
+
+NOTE: py65's disassembler drifts into misinterpreting phoneme/LPC data
+tables as code once it runs past routine boundaries (visible after
+roughly $D9A0 in a straight linear pass) -- a proper disassembly needs
+recursive-descent (follow branches/JSRs, not just walk forward) to stay
+correctly aligned in the data regions.

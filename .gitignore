@@ -1,0 +1,12 @@
+# Build outputs
+build/
+*.o
+*.exe
+*.dll
+*.so
+
+# Generated audio from test runs
+*.wav
+
+# Local Claude Code settings (machine-specific, not shared)
+.claude/settings.local.json

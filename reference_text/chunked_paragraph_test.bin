@@ -1,0 +1,1 @@
+TTesting chunking with quite some extra text should confirm the pipelinehandles longer messages correctly, splits them at sensible points,and produces clean continuous audio without any trouble.

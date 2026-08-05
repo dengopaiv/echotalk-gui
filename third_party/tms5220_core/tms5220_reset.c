@@ -1,0 +1,102 @@
+/* Hand-adapted from MAME's tms5220_device::device_start() and
+ * device_reset() (BSD-3-Clause; see THIRD_PARTY_LICENSES.md). Combines
+ * both into a single reset function since this port has no separate
+ * "construct once, reset many times" device lifecycle -- every field
+ * device_start() set once (m_coeff selection) gets redone here too,
+ * which is harmless (idempotent) and keeps this the single entry point
+ * a caller needs. */
+#include <string.h>
+#include "tms5220_core.h"
+
+bool tms5220_talk_status(tms5220_state *tms)
+{
+    return tms->m_SPEN || tms->m_TALKD;
+}
+
+void tms5220_reset(tms5220_state *tms, int variant)
+{
+    memset(tms, 0, sizeof(*tms));
+    tms->m_variant = variant;
+
+    switch (tms->m_variant)
+    {
+    case TMS5220_IS_TMC0281:
+        tms->m_coeff = &T0280B_0281A_coeff;
+        break;
+    case TMS5220_IS_TMC0281D:
+        tms->m_coeff = &T0280D_0281D_coeff;
+        break;
+    case TMS5220_IS_CD2801:
+        tms->m_coeff = &T0280F_2801A_coeff;
+        break;
+    case TMS5220_IS_M58817:
+        tms->m_coeff = &M58817_coeff;
+        break;
+    case TMS5220_IS_CD2802:
+        tms->m_coeff = &T0280F_2802_coeff;
+        break;
+    case TMS5220_IS_TMS5110A:
+        tms->m_coeff = &tms5110a_coeff;
+        break;
+    case TMS5220_IS_5200:
+    case TMS5220_IS_CD2501ECD:
+        tms->m_coeff = &T0285_2501E_coeff;
+        break;
+    case TMS5220_IS_5220C:
+    case TMS5220_IS_5220:
+        tms->m_coeff = &tms5220_coeff;
+        break;
+    default:
+        tms->m_coeff = &tms5220_coeff; /* fall back rather than abort */
+        break;
+    }
+
+    tms->m_io_ready = true;
+    tms->m_true_timing = false;
+    tms->m_rs_ws = 0x03;
+    tms->m_write_latch = 0;
+
+    /* ---- device_reset() below ---- */
+    tms->m_digital_select = 0; /* FORCE_DIGITAL = 0: analog output, matches Echo II */
+
+    memset(tms->m_fifo, 0, sizeof(tms->m_fifo));
+    tms->m_fifo_head = tms->m_fifo_tail = tms->m_fifo_count = tms->m_fifo_bits_taken = 0;
+
+    tms->m_SPEN = tms->m_DDIS = tms->m_TALK = tms->m_TALKD = tms->m_previous_talk_status =
+        tms->m_irq_pin = tms->m_ready_pin = false;
+    tms5220_set_interrupt_state(tms, 0);
+    tms5220_update_ready_state(tms);
+    tms->m_buffer_empty = tms->m_buffer_low = true;
+
+    tms->m_command_register = NOCOMMAND;
+    tms->m_data_latched = false;
+    tms->m_RDB_flag = false;
+
+    tms->m_new_frame_energy_idx = tms->m_current_energy = tms->m_previous_energy = 0;
+    tms->m_new_frame_pitch_idx = tms->m_current_pitch = 0;
+    tms->m_zpar = tms->m_uv_zpar = false;
+    memset(tms->m_new_frame_k_idx, 0, sizeof(tms->m_new_frame_k_idx));
+    memset(tms->m_current_k, 0, sizeof(tms->m_current_k));
+
+    tms->m_inhibit = true;
+    tms->m_subcycle = tms->m_c_variant_rate = tms->m_pitch_count = tms->m_PC = 0;
+    tms->m_subc_reload = 1; /* FORCE_SUBC_RELOAD = 1: normal (not SPKSLOW) speech rate */
+    tms->m_OLDE = tms->m_OLDP = true;
+    {
+        static const uint8_t reload_table[4] = { 0, 2, 4, 6 };
+        tms->m_IP = reload_table[tms->m_c_variant_rate & 0x3];
+    }
+    tms->m_RNG = 0x1FFF;
+    memset(tms->m_u, 0, sizeof(tms->m_u));
+    memset(tms->m_x, 0, sizeof(tms->m_x));
+
+    tms5220_perform_dummy_read(tms);
+
+    tms->m_PDC = 0;
+    tms->m_CTL_pins = 0;
+    tms->m_state = 0;
+    tms->m_address = 0;
+    tms->m_next_is_address = false;
+    tms->m_addr_bit = 0;
+    tms->m_CTL_buffer = 0;
+}
