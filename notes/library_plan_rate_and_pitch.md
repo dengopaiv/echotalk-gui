@@ -98,7 +98,52 @@ Caveats to be honest about:
 - It is an **emulator capability, not something a real Echo II could
   do** -- that card has a plain 5220. Worth saying plainly in any UI.
 
-### MEASURED: the lever works, the speech does not follow it
+### MEASURED: it works (after a false negative — read this first)
+
+Final numbers, hedge trimmer story:
+
+| rate | periods | predicted | expanded | compressed |
+|---|---|---|---|---|
+| 0 | 8 | 1.00x | 37.32 s | 23.60 s |
+| 1 | 6 | 1.33x | 28.54 s (**1.31x**) | 18.25 s (**1.29x**) |
+| 2 | 4 | 2.00x | 19.76 s (**1.89x**) | 12.90 s (**1.83x**) |
+| 3 | 2 | 4.00x | 10.98 s (**3.40x**) | 7.55 s (**3.13x**) |
+
+Close to prediction; the shortfall at rate 3 is fixed per-chunk overhead
+(restarts and inter-utterance gaps) that does not scale with frame
+length. **Frame-rate control is viable**, and it changes speed without
+changing pitch as expected.
+
+#### The false negative, and what it cost
+
+The first measurement gave 1.04x / 1.08x / 1.13x and this file recorded
+a confident negative conclusion, complete with a plausible-sounding
+theory about FIFO starvation and Textalker's flow control. It was
+wrong. The user identified the real cause **by ear**: the rate was
+resetting at every chunk boundary.
+
+Cause: `tms5220_reset()` opens with `memset(tms, 0, sizeof(*tms))`,
+wiping the whole struct -- including `m_configured_rate`, the field
+added specifically so the setting would survive reset. Textalker issues
+a RESET between every segment, so the rate applied to the first segment
+only.
+
+The tell was there and was missed: **the measurements were byte-identical
+before and after that supposed fix.** A fix that changes nothing at all
+has not taken effect, and that should have been checked before building
+a theory on top of the numbers.
+
+The same memset was also wiping `m_readyq_handler`. That has its own
+consequence: without the callback the Echo II card never learns the chip
+is ready and never releases its write latch. Restoring it took the
+true-timing write clobbering from **17 to 0**, matching MAME, and
+retires the open question in
+`notes/true_timing_implemented_not_the_cause.md` about why our writes
+clobbered when MAME's did not.
+
+Both fields are now saved and restored around the memset, so fields
+added later still default to zero and only deliberately-preserved ones
+survive.
 
 Implemented as `--frame-rate N` and measured on the hedge trimmer story.
 **The predicted speedups do not materialise:**

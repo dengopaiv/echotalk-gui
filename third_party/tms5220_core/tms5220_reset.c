@@ -15,7 +15,35 @@ bool tms5220_talk_status(tms5220_state *tms)
 
 void tms5220_reset(tms5220_state *tms, int variant)
 {
+    /* Host configuration has to survive a chip reset.
+     *
+     * This function is reached two ways: once from the host at startup,
+     * and again every time the RESET command ($Fx) is processed --
+     * which Textalker issues between every segment. The memset below
+     * therefore wipes anything the host configured, once per utterance.
+     * That is what made the frame-rate control appear not to work: it
+     * was correct for the first segment and reset to normal at every
+     * chunk boundary afterwards, which is audible as speech that speeds
+     * up briefly and then falls back.
+     *
+     * The /READY handler has the same problem, and worse consequences:
+     * losing it means the Echo II card never learns the chip is ready
+     * and so never releases its write latch, which is a strong
+     * candidate for the write clobbering seen under true timing.
+     *
+     * Save and restore rather than reordering the memset, so that any
+     * field added to the struct later is still zeroed by default and
+     * only deliberately-preserved ones survive. */
+    uint8_t saved_rate = tms->m_configured_rate;
+    void (*saved_readyq)(void *, int) = tms->m_readyq_handler;
+    void *saved_readyq_ctx = tms->m_readyq_ctx;
+
     memset(tms, 0, sizeof(*tms));
+
+    tms->m_configured_rate = saved_rate;
+    tms->m_readyq_handler = saved_readyq;
+    tms->m_readyq_ctx = saved_readyq_ctx;
+
     tms->m_variant = variant;
 
     switch (tms->m_variant)
