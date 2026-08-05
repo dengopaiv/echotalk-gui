@@ -1,11 +1,25 @@
 ﻿/*
- * render_text_loader.c -- THE CANONICAL TEXTALKER v3.1.3 HARNESS.
+ * render_text_loader.c -- THE CANONICAL TEXTALKER HARNESS.
  *
- * Boots Textalker v3.1.3 by running its REAL loader
- * (roms/textalker.ram.bin at $9300), rather than calling $D003/$FCD6
- * directly the way tools/render_text_real_chip.c does.
+ * Handles BOTH Textalker versions from one binary. Give it any
+ * loader/OBJ pair -- v3.1.3 or v1.3 -- and it works out the rest:
  *
- * Use this one. The direct-init harness is kept only for comparison:
+ *   - where the OBJ loads, from the trampoline templates in the loader
+ *     ($D0xx targets mean $D000, $D4xx mean $D400)
+ *   - where the character entry is, by running the loader and then
+ *     asking through DOS's own hook at $BA69, which leaves the answer
+ *     in the Apple II output vector CSWL ($36/$37)
+ *
+ * Nothing is keyed to a particular build, so a 3.1.2 or 3.1.4 image
+ * should work without being recognised individually. Only two things
+ * remain version-specific, both scoped to the $D000 family and both
+ * only diagnostics: the $FD87 card-detection flag and the $FCD6
+ * fallback, neither of which means anything in a v1.3 image.
+ * See notes/multi_version_support_design.md.
+ *
+ * It boots by running Textalker's REAL loader rather than calling
+ * $D003/$FCD6 directly the way tools/render_text_real_chip.c does. Use
+ * this one; the direct-init harness is kept only for comparison, since
  * this approach was confirmed by ear (session 10) to fix the onset
  * glitch that had been open since session 9, in every case tested.
  *
@@ -319,17 +333,46 @@ int main(int argc, char **argv) {
     const char *ram_path = g_ropts.pos[0], *obj_path = g_ropts.pos[1];
     const char *in_path  = g_ropts.pos[2], *out_path = g_ropts.pos[3];
 
-    FILE *fo = fopen(obj_path, "rb");
-    if (!fo) { perror(obj_path); return 1; }
-    size_t no = fread(mem + 0xD000, 1, 0x3000, fo);
-    fclose(fo);
-    VLOG("Loaded %zu bytes of TEXTALKER.OBJ at $D000\n", no);
-
+    /* The loader is read first, because it says where the OBJ goes. */
     FILE *fr = fopen(ram_path, "rb");
     if (!fr) { perror(ram_path); return 1; }
-    size_t nr = fread(mem + 0x9300, 1, 0x300, fr);
+    size_t nr = fread(mem + 0x9300, 1, 0x2000, fr);
     fclose(fr);
     VLOG("Loaded %zu bytes of TEXTALKER.RAM (loader) at $9300\n", nr);
+
+    /* Derive the OBJ load address rather than hardcoding it.
+     *
+     * Every loader carries templates of the trampoline it installs,
+     * PHA / LDA $C08B / JMP <entry>, and those entries are the OBJ's own
+     * jump table -- $D003/$D006/$D009 for v3.1.3, $D400/$D403 for v1.3.
+     * The page of any of them is therefore where the image belongs:
+     * $D0xx means $D000, $D4xx means $D400.
+     *
+     * This is what lets one binary handle both versions, and it
+     * generalises to builds we have never seen: a 3.1.2 or 3.1.4 image
+     * shares 3.1.3's layout and lands on the same answer without being
+     * recognised individually. */
+    uint16_t obj_addr = 0;
+    for (size_t i = 0; i + 6 < nr; i++) {
+        const uint8_t *p = mem + 0x9300 + i;
+        if (p[0] == 0x48 && p[1] == 0xAD && p[2] == 0x8B &&
+            p[3] == 0xC0 && p[4] == 0x4C) {
+            obj_addr = (uint16_t)(p[6] << 8);
+            break;
+        }
+    }
+    if (!obj_addr) {
+        fprintf(stderr, "ERROR: no entry trampoline (PHA/LDA $C08B/JMP) in the "
+                        "loader -- cannot tell where the OBJ loads\n");
+        return 1;
+    }
+    VLOG("Loader says the OBJ loads at $%04X\n", obj_addr);
+
+    FILE *fo = fopen(obj_path, "rb");
+    if (!fo) { perror(obj_path); return 1; }
+    size_t no = fread(mem + obj_addr, 1, 0x10000 - obj_addr, fo);
+    fclose(fo);
+    VLOG("Loaded %zu bytes of TEXTALKER.OBJ at $%04X\n", no, obj_addr);
 
     long tlen = 0;
     uint8_t *text = render_load_input(&g_ropts, in_path, &tlen);
@@ -468,8 +511,11 @@ int main(int argc, char **argv) {
      * boundary, wherever in the text that happens to fall. */
     VLOG("  line-buffer bounds: $FD80=%d $FD81=%d $FD82=%d, $C01F(80col)=$%02X\n",
          mem[0xFD80], mem[0xFD81], mem[0xFD82], mem[0xC01F]);
-    /* Always worth knowing: if detection failed the audio is garbage. */
-    if (mem[0xFD87] != 0x1F)
+    /* $FD87 is v3.1.3's card-detection flag. In a v1.3 image that
+     * address is ordinary code, so the check only means anything for
+     * the $D000 family -- checking it regardless produced a false
+     * alarm on v1.3, whose own indicators are $EC0B and $F48F. */
+    if (obj_addr == 0xD000 && mem[0xFD87] != 0x1F)
         fprintf(stderr, "WARNING: card detection did not succeed (FD87=$%02X)\n", mem[0xFD87]);
 
     /* Locate the per-character entry rather than hardcoding $BA7C: the
@@ -549,7 +595,10 @@ int main(int argc, char **argv) {
      * run it if the loader did not already achieve card detection, so
      * that a loader-driven boot stays as close to the real thing as
      * possible. */
-    if (mem[0xFD87] != 0x1F) {
+    if (obj_addr == 0xD000 && mem[0xFD87] != 0x1F) {
+        /* $FCD6 is a v3.1.3 address too; in a v1.3 image it lands in
+         * the middle of unrelated code, so this fallback is scoped to
+         * the same family as the flag that triggers it. */
         int s2 = run_to_halt(0xFCD6, 20000, 0x0202, 0, 0);
         VLOG("Ran $FCD6 explicitly: %d steps (card detection %s -- FD87=%02X)\n",
              s2, mem[0xFD87] == 0x1F ? "SUCCEEDED" : "FAILED", mem[0xFD87]);

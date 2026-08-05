@@ -138,6 +138,34 @@ versions unconditionally.
 same latent language-card problem" follow-up flagged earlier. If v1.3
 renders identically with banking modelled, the two code paths merge.
 
+## Status: one harness now handles both versions
+
+`tools/render_text_loader.c` takes any loader/OBJ pair and works out the
+rest. Verified by pointing it at each set in turn:
+
+```
+v3.1.3 files -> OBJ at $D000, CSWL $BA7C, 2248 samples, -12127/+26833
+v1.3   files -> OBJ at $D400, CSWL $BA82, 2246 samples, -12127/+26833
+```
+
+and its v1.3 output is **byte-identical to the dedicated v1.3 harness**
+across the whole corpus, with no warnings or traps on either version.
+
+Two things had to be finished after the first attempt at this:
+
+- **The OBJ load address was still hardcoded.** Pointing the v3.1.3
+  harness at v1.3 files loaded the image 1K low, so execution ran into
+  garbage and hit the wild-jump trap at `$0000`. It now derives the
+  address from the loader's trampoline templates before loading
+  anything.
+- **Two checks were version-specific without being scoped.** `$FD87` is
+  v3.1.3's card-detection flag and `$FCD6` its detection routine; in a
+  v1.3 image those addresses are ordinary code. Checking `$FD87`
+  regardless produced a false "card detection did not succeed" warning
+  on v1.3, and the `$FCD6` fallback it guards would have called into the
+  middle of unrelated code. Both are now conditional on the `$D000`
+  family. v1.3's own equivalents are `$EC0B` and `$F48F`.
+
 ## Proposed shape
 
 One implementation, one small profile resolved at load time:
