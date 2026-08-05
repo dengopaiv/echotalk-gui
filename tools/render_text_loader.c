@@ -1,4 +1,4 @@
-/*
+﻿/*
  * render_text_loader.c -- THE CANONICAL TEXTALKER v3.1.3 HARNESS.
  *
  * Boots Textalker v3.1.3 by running its REAL loader
@@ -80,6 +80,7 @@ static int readlatch_flag = 1;
 static uint8_t rom_shadow[0x3000];
 static int lc_ram_enabled = 1; /* Textalker visible by default */
 static int bank_trace = 0;     /* set via ECHOTALK_BANK_TRACE=1 */
+static uint16_t pc_watch = 0;  /* set via ECHOTALK_PC_WATCH=D781 */
 
 static inline int is_lc_space(uint16_t address) { return address >= 0xD000; }
 
@@ -206,6 +207,9 @@ static int run_to_halt(uint16_t entry, int max_steps, uint16_t halt_addr,
     pc = entry;
     int steps = 0;
     while (pc != halt_addr && steps < max_steps) {
+        if (pc_watch && pc == pc_watch) {
+            fprintf(stderr, "[pc] reached $%04X (A=%02X X=%02X Y=%02X)\n", pc, a, x, y);
+        }
         uint32_t before = clockticks6502;
         step6502(0);
         uint32_t elapsed = clockticks6502 - before;
@@ -241,6 +245,7 @@ int main(int argc, char **argv) {
 
     bank_trace = getenv("ECHOTALK_BANK_TRACE") != NULL;
     chip_trace = getenv("ECHOTALK_CHIP_TRACE") != NULL;
+    { const char *w = getenv("ECHOTALK_PC_WATCH"); if (w) pc_watch = (uint16_t)strtol(w, NULL, 16); }
     { const char *hz = getenv("ECHOTALK_CPU_HZ");
       if (hz) { cycles_per_sample = atof(hz) / CHIP_HZ;
                 fprintf(stderr, "[experiment] CPU %s Hz -> %.3f cycles/sample\n",
@@ -294,6 +299,18 @@ int main(int argc, char **argv) {
     mem[0x0024] = 0x00;
     mem[0x0028] = 0x00; mem[0x0029] = 0x04;
 
+    /* Text window width (WNDWDTH, zero page $21) and the 80-column
+     * hardware flag. Textalker derives its line-buffer size from these
+     * at $D781 -- without them the buffer bounds at $FD80-$FD82 stay
+     * zero and the auto-flush boundary is undefined, which is what
+     * caused speech to break mid-word at arbitrary offsets. */
+    { const char *w = getenv("ECHOTALK_WIDTH");
+      int width = w ? atoi(w) : 40;
+      mem[0x0021] = (uint8_t)width;
+      mem[0x0020] = 0x00;                    /* WNDLFT */
+      mem[0xC01F] = width > 40 ? 0x80 : 0x00; /* RD80COL: bit 7 = 80-col active */
+    }
+
     /* The loader's prologue reads DOS's register-save slots so it can
      * restore them and RTS cleanly at the end. We jam PC in directly
      * rather than arriving via a real JSR from DOS, so seed $AA59 with
@@ -316,6 +333,13 @@ int main(int argc, char **argv) {
     }
     VLOG("  $FD87 (card detection) = $%02X %s\n",
          mem[0xFD87], mem[0xFD87] == 0x1F ? "(SUCCEEDED)" : "(not set by loader)");
+    /* Textalker's line-buffer bounds, set from the screen width at
+     * $D781 (see notes/buffer_chunking_and_indexing.md): $FD80 is
+     * width+1, $FD81 width-1, $FD82 width. The per-character dispatch
+     * loop auto-flushes -- i.e. speaks -- when the buffer reaches this
+     * boundary, wherever in the text that happens to fall. */
+    VLOG("  line-buffer bounds: $FD80=%d $FD81=%d $FD82=%d, $C01F(80col)=$%02X\n",
+         mem[0xFD80], mem[0xFD81], mem[0xFD82], mem[0xC01F]);
     /* Always worth knowing: if detection failed the audio is garbage. */
     if (mem[0xFD87] != 0x1F)
         fprintf(stderr, "WARNING: card detection did not succeed (FD87=$%02X)\n", mem[0xFD87]);

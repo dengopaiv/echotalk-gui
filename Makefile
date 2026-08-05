@@ -48,7 +48,8 @@ CFLAGS_COMMON = -Wall -O2 -Ithird_party/tms5220_core -Itools -Isrc
 EMU_SOURCES = third_party/fake6502/fake6502.c \
               third_party/tms5220_core/tms5220_core.c \
               third_party/tms5220_core/tms5220_reset.c \
-              src/text_prep.c
+              src/text_prep.c \
+              src/chunker.c
 
 # The canonical v3.1.3 harness: boots via Textalker's own loader.
 SOURCES_LOADER = tools/render_text_loader.c $(EMU_SOURCES)

@@ -20,6 +20,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "text_prep.h"
+#include "chunker.h"
 
 /* A sample counts as silence below this. The TMS5220 does not idle at
  * exactly zero, so a zero test would find "audio" immediately. */
@@ -38,16 +39,34 @@
  * Send this once, after init and before any real text. */
 #define REPEAT_FILTER_DISABLE "\x05" "99R"
 
+/* Longest run of text handed to Textalker between CRs.
+ *
+ * Textalker auto-flushes -- i.e. speaks -- when its line buffer fills,
+ * and that boundary lands wherever it lands, including the middle of a
+ * word. Worse, in this harness the bound is never even initialised:
+ * Textalker computes it at $D781 from the Apple II text-window width,
+ * and $D781 is never reached, because nothing here plays the part of
+ * DOS/Applesoft setting up a screen. $FD80-$FD82 stay zero and the
+ * effective flush point is emergent (observed around 165 characters).
+ *
+ * So we must not let Textalker reach its own boundary. Chunking here
+ * splits at clause boundaries first, then word boundaries, so speech
+ * breaks where a reader would breathe. 80 matches the largest buffer
+ * Textalker natively supports (80-column mode) while staying well under
+ * the observed flush point. */
+#define DEFAULT_CHUNK_SIZE 80
+
 typedef struct {
     int verbose;
     int trim;
     int repeat_filter_fix;  /* send REPEAT_FILTER_DISABLE during init */
     int raw_input;          /* skip text preparation */
+    int chunk_size;         /* 0 = do not chunk */
     const char *pos[8];
     int npos;
 } render_opts;
 
-static render_opts g_ropts = { 0, 1, 1, 0, { 0 }, 0 };
+static render_opts g_ropts = { 0, 1, 1, 0, DEFAULT_CHUNK_SIZE, { 0 }, 0 };
 
 #define VLOG(...) do { if (g_ropts.verbose) fprintf(stderr, __VA_ARGS__); } while (0)
 
@@ -63,8 +82,12 @@ static inline void render_usage(const char *prog, const char *argspec) {
         "                      default, where \"EEEEEEEEE\" is spoken as \"EE\"\n"
         "      --raw           send input bytes as-is, with no conversion to\n"
         "                      7-bit ASCII and no LF stripping\n"
+        "      --chunk N       split long lines at clause/word boundaries every\n"
+        "                      N characters (default %d)\n"
+        "      --no-chunk      never split; lets Textalker's own buffer decide,\n"
+        "                      which can break speech mid-word\n"
         "  -h, --help          this message\n",
-        prog, argspec);
+        prog, argspec, DEFAULT_CHUNK_SIZE);
 }
 
 /* Returns 0 on success. Collects non-flag arguments in o->pos. */
@@ -76,6 +99,8 @@ static inline int render_parse_args(int argc, char **argv, int need,
         else if (!strcmp(arg, "--no-trim")) o->trim = 0;
         else if (!strcmp(arg, "--no-repeat-fix")) o->repeat_filter_fix = 0;
         else if (!strcmp(arg, "--raw")) o->raw_input = 1;
+        else if (!strcmp(arg, "--no-chunk")) o->chunk_size = 0;
+        else if (!strcmp(arg, "--chunk") && i + 1 < argc) o->chunk_size = atoi(argv[++i]);
         else if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             render_usage(argv[0], argspec);
             exit(0);
@@ -93,6 +118,9 @@ static inline int render_parse_args(int argc, char **argv, int need,
     }
     return 0;
 }
+
+static inline uint8_t *render_chunk_lines(const render_opts *o,
+                                          uint8_t *text, long len, long *out_len);
 
 /* Loads a file and converts it to the 7-bit ASCII Textalker expects
  * (unless --raw). Returns a malloc'd buffer and sets *out_len; the
@@ -118,8 +146,64 @@ static inline uint8_t *render_load_input(const render_opts *o,
     if ((long)need != raw_len && o->verbose)
         fprintf(stderr, "Text preparation: %ld bytes in, %zu out\n", raw_len, need);
     free(raw);
-    *out_len = (long)need;
-    return (uint8_t *)prepped;
+    return render_chunk_lines(o, (uint8_t *)prepped, (long)need, out_len);
+}
+
+/* Splits text so Textalker never reaches its own buffer boundary.
+ *
+ * CR is an explicit utterance boundary in the input, so lines are
+ * honoured as-is and only over-long ones are chunked; each resulting
+ * chunk is terminated with its own CR, which is what makes Textalker
+ * speak it. Text short enough to fit is passed through untouched, so
+ * this is a no-op for anything that already fits.
+ *
+ * Returns a malloc'd buffer; caller owns it. */
+static inline uint8_t *render_chunk_lines(const render_opts *o,
+                                          uint8_t *text, long len, long *out_len) {
+    if (o->chunk_size <= 0) { *out_len = len; return text; }
+
+    /* Worst case adds one CR per chunk, plus a terminator. */
+    size_t cap = (size_t)len + (size_t)(len / o->chunk_size + 2) + 1;
+    uint8_t *out = (uint8_t *)malloc(cap);
+    size_t w = 0;
+    int split_count = 0;
+
+    long line_start = 0;
+    for (long i = 0; i <= len; i++) {
+        int at_end = (i == len);
+        if (!at_end && text[i] != '\r') continue;
+        long line_len = i - line_start;
+
+        if (line_len > 0) {
+            if (line_len <= o->chunk_size) {
+                memcpy(out + w, text + line_start, (size_t)line_len);
+                w += (size_t)line_len;
+                out[w++] = '\r';
+            } else {
+                echotalk_chunk chunks[256];
+                size_t n = echotalk_chunk_text((const char *)text + line_start,
+                                               (size_t)line_len,
+                                               (size_t)o->chunk_size,
+                                               chunks, 256);
+                for (size_t c = 0; c < n; c++) {
+                    memcpy(out + w, text + line_start + chunks[c].offset, chunks[c].length);
+                    w += chunks[c].length;
+                    out[w++] = '\r';
+                }
+                if (n > 1) split_count += (int)n - 1;
+            }
+        } else if (!at_end) {
+            out[w++] = '\r'; /* preserve blank lines / bare CRs */
+        }
+        line_start = i + 1;
+    }
+
+    if (split_count && o->verbose)
+        fprintf(stderr, "Chunking: %d extra split(s) at clause/word boundaries "
+                        "(max %d chars)\n", split_count, o->chunk_size);
+    free(text);
+    *out_len = (long)w;
+    return out;
 }
 
 /* Index of the first sample that is not leading silence, backed off by
