@@ -27,12 +27,12 @@ for use as an NVDA speech backend. It ships as a real 6502 emulation of
 Textalker driving a ported TMS5220, with no dependency on Apple ROM or
 DOS code.
 
-## Current state: the emulation is finished and correct
+## Current state: emulation correct, library working, DLL not packaged
 
 Speech is validated against real hardware and against MAME. **All
-previously open bugs are fixed.** What does not exist yet is the
-library: everything so far is diagnostic tools that turn a file of text
-into a WAV.
+previously open bugs are fixed**, and **the library now exists** --
+`src/echotalk.[ch]`, driven by `tools/say.c`. What is not done is the
+DLL export surface, streaming output, and NVDA index events.
 
 Fixed in session 10, in order:
 
@@ -68,9 +68,14 @@ echotalk/
   roms/                       Textalker binaries, user-supplied,
                               proprietary. See THIRD_PARTY_LICENSES.md.
   src/
+    echotalk.c/.h             THE LIBRARY. Public API; the harness's
+                              pipeline turned into something callable.
     chunker.c/.h              splits text to fit Textalker's buffer
     text_prep.c/.h            modern text -> 7-bit ASCII, LF stripping
+    resample.c/.h             linear resampling, no anti-aliasing
   tools/
+    say.c                     drives the library the way a host would;
+                              the end-to-end test that the API works
     render_text_loader.c      THE canonical harness. Handles BOTH
                               Textalker versions from one binary.
     render_common.h           shared CLI, trimming, WAV output, chunking
@@ -126,9 +131,65 @@ Diagnostic environment variables: `ECHOTALK_CHIP_TRACE`,
 `ECHOTALK_PHASE`, `ECHOTALK_CPU_HZ`, `ECHOTALK_TRUE_TIMING`,
 `ECHOTALK_INSTANT`.
 
+## The library
+
+`src/echotalk.h` is the API and documents itself; the short version:
+
+```c
+echotalk *et = echotalk_create(loader_path, obj_path, err, sizeof err);
+echotalk_set_compressed(et, 1);      /* Textalker's own two rates    */
+echotalk_set_frame_rate(et, 2);      /* 0-3, speed only, no pitch    */
+echotalk_set_clock_multiplier(et, 1.5); /* speed AND pitch           */
+echotalk_set_sample_rate(et, 22050); /* output format only           */
+echotalk_speak(et, "Hello.");
+while ((n = echotalk_read(et, buf, 1024)) > 0) { /* 16-bit mono PCM */ }
+```
+
+Plus `echotalk_set_pitch` (0-63), `_volume` (0-15), `_word_delay`
+(0-15, **no effect under v1.3**, which never implemented that command),
+and `_repeat_filter` (0-99, default 99 so it never triggers).
+
+Which Textalker version you get is decided by the images passed;
+`echotalk_version()` reports the parsed banner for display.
+
+The four rate-ish controls are deliberately independent -- pitch changes
+pitch only, frame rate changes speed only, the clock multiplier changes
+both, and the sample rate changes neither. See
+`notes/library_plan_rate_and_pitch.md`.
+
+Behaviour worth knowing:
+
+- An utterance that is exactly one character after preparation and
+  chunking is wrapped in `Ctrl-E L`/`Ctrl-E A` and restored afterwards
+  with `Ctrl-E S`/`Ctrl-E W`, so a lone letter or punctuation mark is
+  announced rather than swallowed. A bare `,` is silent without this.
+- Boot audio is discarded, which matters most for v1.3 and its ~1.37 s
+  calibration delay.
+- Dead air is trimmed at the head of **every** utterance, not just the
+  first. Getting this wrong leaves an audible pause at every chunk
+  boundary, which is how the bug was found.
+
+**Single instance only.** Fake6502 keeps the CPU in globals, so
+`echotalk_create()` fails if one already exists. Fine for a screen
+reader; it forecloses two simultaneous voices.
+
+```
+say [options] <loader.bin> <obj.bin> [text] <out.wav>
+  --file PATH   read the text from a file (omit the text argument)
+  --rate HZ --clock MULT --frame-rate N --compressed
+  --pitch N --volume N --word-delay N --repeat-filter N
+```
+
 ## Reference baselines (regression check after any change)
 
-Current defaults (trimmed, chunked, repeat-fix on), in samples at 8 kHz:
+**Measured with `render_text_loader`, not the library.** The library
+differs slightly and legitimately: it sends a settings block ahead of
+the text (~40 samples) and treats single-character utterances
+differently by design. Compare like with like, or re-measure this table
+with `say` and say so here.
+
+Current harness defaults (trimmed, chunked, repeat filter off), in
+samples at 8 kHz:
 
 | input | v3.1.3 | v1.3 |
 |---|---|---|
@@ -197,17 +258,27 @@ default.
 
 ## What is left
 
-1. **The library.** No `echotalk_init()`/`echotalk_speak()`, no DLL
-   exports, no streaming output. NVDA needs audio as it is generated,
-   not a WAV afterwards. This is the main remaining work and the
-   emulation underneath it is ready.
-2. **Look-ahead synthesis and index events** for NVDA's `IndexReached`,
-   designed in `notes/buffer_chunking_and_indexing.md`, not implemented.
-3. Smaller: unmapped-character policy in `text_prep` is a UX decision
-   worth revisiting; true timing is implemented but opt-in because it
-   loses 17 writes to latch clobbering that MAME does not (see
-   `notes/true_timing_implemented_not_the_cause.md`); `tools/` has
-   several historical probes that could be deleted.
+1. **DLL export surface** and `make win64-dll` / `win32-dll` targets.
+   Small, and it makes the library testable from Python, which is where
+   the real NVDA integration questions will surface. Do this first.
+2. **Streaming.** `echotalk_speak()` synthesises the whole utterance
+   before `echotalk_read()` returns anything. NVDA wants audio as it is
+   generated -- the look-ahead design is in
+   `notes/buffer_chunking_and_indexing.md`.
+3. **Index events** for NVDA's `IndexReached`, same note.
+4. Smaller: re-measure the baseline table with `say` if the library is
+   to be the reference; the unmapped-character policy in `text_prep` is
+   a UX decision worth revisiting; continuous frame-rate control beyond
+   the four steps would need the accumulator described in
+   `notes/library_plan_rate_and_pitch.md`; `tools/` has several
+   historical probes that could be deleted.
+
+Note that true timing (`ECHOTALK_TRUE_TIMING=1` on the harness) is
+implemented and now clobbers nothing -- the write-latch losses that kept
+it opt-in were caused by reset wiping the `/READY` callback, since
+fixed. It still produces byte-identical output, so there is no reason to
+switch the default, but the reservation recorded in
+`notes/true_timing_implemented_not_the_cause.md` no longer applies.
 
 ## Working practices that paid off
 

@@ -11,8 +11,8 @@ reimplemented or approximated.
 
 ## Status
 
-**The emulation is complete and validated. The library is not built
-yet.**
+**The emulation is complete and validated, and the library works. What
+is left is packaging it as a DLL and making it stream.**
 
 - Speech matches a real-hardware capture exactly in amplitude
   (-12127/+26833 for "HI") and matches MAME frame-for-frame and
@@ -27,9 +27,18 @@ yet.**
 - Every bug found so far is fixed, including a speech-pacing defect
   traced to a `#define` lost during the port from MAME.
 
-What remains is the library API itself (`echotalk_init` /
-`echotalk_speak` / streaming audio out), the DLL export surface, and
-NVDA index-event reporting.
+- The library is in `src/echotalk.[ch]`: create it with a loader and OBJ
+  image, set pitch, volume, word delay, repeat filter, expanded or
+  compressed speech, speed and output rate, then speak and pull PCM.
+
+Four controls cover rate and pitch independently — Textalker's pitch
+command changes pitch alone, the TMS5220 frame rate changes speed alone,
+the clock multiplier changes both for the sped-up-tape character, and
+the output sample rate changes neither.
+
+What remains is the DLL export surface, streaming audio out (speech is
+currently synthesised in full before it can be read), and NVDA
+index-event reporting.
 
 **Start with [HANDOFF.md](HANDOFF.md)** — it has the current state,
 build and run instructions, reference baselines, and the facts worth not
@@ -44,15 +53,22 @@ make native
 make test          # pure-logic unit tests, no ROMs needed
 ```
 
-Then, given a Textalker loader and OBJ image:
+Then, given a Textalker loader and OBJ image, speak through the library:
+
+```
+say loader.bin obj.bin "Hello." out.wav
+say --file story.txt --compressed --frame-rate 2 loader.bin obj.bin out.wav
+```
+
+or drive the emulation directly with the diagnostic harness, which takes
+raw bytes including Echo control codes:
 
 ```
 render_text_loader loader.bin obj.bin input.bin out.wav
 ```
 
-`input.bin` is raw text plus Echo control codes, high bit not set. The
-same command works for either Textalker version — it reads which one it
-has from the loader.
+Both work with either Textalker version — they read which one they have
+from the loader rather than being told.
 
 ## Third-party code
 

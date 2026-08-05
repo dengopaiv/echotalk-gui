@@ -28,6 +28,10 @@ authoritative**, not the numbers here.
 
 ## Design and architecture
 
+- `library_plan_rate_and_pitch.md` — the rate, pitch and resampling
+  design behind the library's controls, and a worked example of a
+  confident negative result that was wrong: frame-rate control was
+  written off on a measurement that had silently not taken effect.
 - `multi_version_support_design.md` — how one binary handles both
   Textalker versions, detected structurally rather than by hash.
 - `buffer_chunking_and_indexing.md` — chunking rationale and the
