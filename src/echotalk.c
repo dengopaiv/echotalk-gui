@@ -56,6 +56,10 @@ struct echotalk {
     int word_delay, repeat_filter;
     int settings_dirty;
 
+    /* one mark per utterance, for dead-air trimming */
+    size_t marks[4096];
+    size_t nmarks;
+
     /* audio queue */
     int16_t *audio;
     uint8_t *speaking;
@@ -359,6 +363,14 @@ static void apply_settings(echotalk *et) {
  * be read as a word or swallowed by the command dispatcher. */
 static void send_utterance(echotalk *et, const char *s, size_t len) {
     int single = (len == 1);
+    /* Record where this utterance's audio starts. Textalker processes a
+     * whole line before sending anything to the chip, and that work
+     * scales with the amount of text, so every utterance is preceded by
+     * dead air proportional to its length. Trimming needs one mark per
+     * utterance, not one per speak() call -- otherwise the pause at
+     * every chunk boundary survives. */
+    if (et->nmarks < sizeof(et->marks) / sizeof(et->marks[0]))
+        et->marks[et->nmarks++] = et->count;
     if (single) send_string(et, "\x05L\x05" "A");
     for (size_t i = 0; i < len; i++) send_char(et, (uint8_t)s[i]);
     send_char(et, '\r');
@@ -379,6 +391,7 @@ int echotalk_speak(echotalk *et, const char *text) {
     /* Mark where this utterance's audio begins so the think-time dead
      * air before it can be trimmed; CR is what makes Textalker speak. */
     size_t utt_start = et->count;
+    et->nmarks = 0;
 
     const char *line = prepped;
     size_t remaining = need;
@@ -409,26 +422,42 @@ int echotalk_speak(echotalk *et, const char *text) {
     while (tms5220_talk_status(&et->tms) && guard++ < 500000)
         tick_chip(et, (uint32_t)CYCLES_PER_SAMPLE);
 
-    /* Trim dead air at the head of this utterance: skip forward to the
-     * first sample that is both played by the chip and audible, so a
-     * pause the chip is deliberately playing is never reachable. */
-    size_t i = utt_start;
-    while (i < et->count) {
-        int mag = et->audio[i] < 0 ? -et->audio[i] : et->audio[i];
-        if (et->speaking[i] && mag > TRIM_THRESHOLD) break;
-        i++;
-    }
-    if (i < et->count) {
-        size_t skip = i - utt_start;
-        if (skip > TRIM_MARGIN) {
-            skip -= TRIM_MARGIN;
-            memmove(et->audio + utt_start, et->audio + utt_start + skip,
-                    (et->count - utt_start - skip) * sizeof(int16_t));
-            memmove(et->speaking + utt_start, et->speaking + utt_start + skip,
-                    et->count - utt_start - skip);
-            et->count -= skip;
+    /* Trim the dead air at the head of every utterance, closing the gap
+     * up as we go.
+     *
+     * The scan stops at the first sample that is both played by the chip
+     * (TALKD set) and audible. Both conditions matter: TALKD alone stops
+     * on the obligatory silent frame emitted when speech restarts, which
+     * is an artifact rather than content, and amplitude alone can stop
+     * on a stray non-zero sample while the chip is idle. Because it
+     * halts at the first audible output, it can only ever consume
+     * silence at the head of an utterance -- a pause after a comma or
+     * period follows audible speech and is unreachable. */
+    size_t w = utt_start, pos = utt_start;
+    for (size_t m = 0; m < et->nmarks; m++) {
+        size_t start = (m == 0) ? utt_start : et->marks[m];
+        size_t end   = (m + 1 < et->nmarks) ? et->marks[m + 1] : et->count;
+        if (start < pos) start = pos;
+        if (end < start) end = start;
+
+        size_t i = start, skip = 0;
+        while (i < end) {
+            int mag = et->audio[i] < 0 ? -et->audio[i] : et->audio[i];
+            if (et->speaking[i] && mag > TRIM_THRESHOLD) break;
+            i++;
         }
+        if (i < end) {              /* nothing audible -> keep it all */
+            size_t run = i - start;
+            if (run > TRIM_MARGIN) skip = run - TRIM_MARGIN;
+        }
+        for (size_t k = start + skip; k < end; k++) {
+            et->audio[w] = et->audio[k];
+            et->speaking[w] = et->speaking[k];
+            w++;
+        }
+        pos = end;
     }
+    if (et->nmarks) et->count = w;
 
     /* Convert this utterance to the output format once, here, rather
      * than in echotalk_read -- doing it there would resample the
