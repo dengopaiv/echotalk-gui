@@ -52,6 +52,7 @@ extern void step6502(int printRegs);
 static uint8_t mem[0x10000];
 static tms5220_state tms;
 static int readlatch_flag = 1;
+static int true_timing = 1;
 
 /* --- Minimal Apple II language-card banking ---
  *
@@ -127,6 +128,14 @@ static void trace_chip_state(void) {
 }
 
 static void tick_chip(uint32_t elapsed_cpu_cycles) {
+    /* Resolve any pending /READY cycle first. Its delays are 13us for a
+     * read and 25us for a write, both far shorter than the 125us
+     * between generated samples, so this is driven off elapsed CPU
+     * cycles (~1us each) rather than the sample clock -- otherwise
+     * every delay would round up to a whole sample. */
+    if (true_timing)
+        tms5220_tick_ready_timer(&tms, elapsed_cpu_cycles * (1000000.0 / CPU_HZ));
+
     tick_accumulator += elapsed_cpu_cycles;
     while (tick_accumulator >= CYCLES_PER_SAMPLE) {
         int16_t sample;
@@ -170,13 +179,41 @@ static int echo_write_count = 0;
 static unsigned long poll_pc_count[0x10000];
 static int poll_trace = 0;
 
+/* --- Echo II card, modelled on a2echoii.cpp ---
+ *
+ * Every address in $C0A0-$C0AF hits the same pair of latches. Reads
+ * alternate between a real status byte and the bus pull-up value, with
+ * the 74C74 inverting itself on each access and driving /RS. Writes
+ * latch a byte into the 74LS373 and pull /WS low; the chip takes it
+ * when it is ready, and the /READY edge is what releases the latch for
+ * the next write. If the host writes again before that, the latched
+ * byte is lost -- which is worth warning about, since it means data
+ * never reached the chip.
+ *
+ * The alternating read is not a quirk to work around: Textalker's own
+ * status helper at $FCC9 reads the port twice with six ROR A of delay
+ * between, which is exactly long enough for /READY to come back after
+ * /RS falls. The first read arms the latch, the second collects it. */
+static uint8_t writelatch_data = 0xff;
+static int writelatch_flag = 1;
+
+static void echoii_readyq(void *ctx, int state) {
+    (void)ctx;
+    if (state) return;          /* rising edge of /READY does nothing */
+    writelatch_flag = 1;        /* chip is ready: release the write latch */
+    tms5220_wsq_w(&tms, 1, 0);
+}
+
 uint8_t read6502(uint16_t address) {
     if (address >= 0xC0A0 && address <= 0xC0AF) {
         uint8_t retval;
         if (poll_trace) poll_pc_count[pc]++;
         if (!readlatch_flag) retval = 0x1f | tms5220_status_r(&tms);
         else retval = 0xff;
+        /* on the rising edge of /DEVREAD, i.e. after the read: the
+         * latch inverts itself and drives /RS */
         readlatch_flag = !readlatch_flag;
+        if (true_timing) tms5220_rsq_w(&tms, readlatch_flag);
         return retval;
     }
     /* Language-card softswitches. Only the two Textalker actually uses
@@ -197,7 +234,17 @@ static FILE *byte_dump = NULL;
 void write6502(uint16_t address, uint8_t value) {
     if (address >= 0xC0A0 && address <= 0xC0AF) {
         if (byte_dump) fprintf(byte_dump, "%02x ", value);
-        tms5220_data_w(&tms, value);
+        if (true_timing) {
+            if (!writelatch_flag)
+                fprintf(stderr, "WARNING: echo II latch (%02X) clobbered by %02X "
+                                "before the chip read it\n", writelatch_data, value);
+            writelatch_data = value;
+            writelatch_flag = 0;             /* /DEVWRITE clears it on the falling edge */
+            tms5220_wsq_w(&tms, 0, value);
+            tms5220_data_w(&tms, writelatch_data);
+        } else {
+            tms5220_data_w(&tms, value);
+        }
         echo_write_count++;
         return;
     }
@@ -288,7 +335,27 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "[experiment] CPU %s Hz -> %.3f cycles/sample\n",
                         hz, cycles_per_sample); } }
 
+    /* True timing (ECHOTALK_TRUE_TIMING=1) drives the chip through the
+     * real /RS, /WS and /READY handshake the way the Echo II card does,
+     * instead of MAME's "hacky instant write mode".
+     *
+     * NOT the default, deliberately. It produces byte-identical output
+     * -- unsurprising once the magnitudes are compared, since /READY
+     * delays are 13-25us against a 25ms frame -- while also losing 17
+     * bytes to write-latch clobbering that MAME never suffers. Until
+     * that is understood it is strictly worse, so it stays opt-in. */
+    true_timing = getenv("ECHOTALK_TRUE_TIMING") != NULL;
+
     tms5220_reset(&tms, TMS5220_IS_5220);
+    if (true_timing) {
+        /* Installed after reset so the reset's own update_ready_state
+         * does not fire into it. Then mirror a2echoii's reset_from_bus:
+         * /RESET presets the read latch, which drives /RS high. */
+        tms.m_readyq_handler = echoii_readyq;
+        tms.m_readyq_ctx = NULL;
+        readlatch_flag = 1;
+        tms5220_rsq_w(&tms, readlatch_flag);
+    }
 
     /* Experiment (ECHOTALK_PHASE=N): advance the chip's internal frame
      * counters by N samples before anything else runs, shifting the

@@ -172,6 +172,16 @@ typedef struct tms5220_state {
      * m_DDIS) never clears again for the rest of the utterance, so
      * wsq_w can use it instead to avoid that lag. */
     bool m_seen_ddis;
+
+    /* /READY handler, the equivalent of MAME's m_readyq_handler devcb.
+     * Called on every change of the ready pin with the ACTIVE-LOW value
+     * (0 = ready, 1 = not ready), matching what a2echoii.cpp's
+     * tms_readyq_callback receives. The Echo II card uses the ready
+     * edge to release its write latch, so a host driving the chip
+     * through rsq_w/wsq_w must install this. NULL is fine for the
+     * instant-write path, which never gates on /READY. */
+    void (*m_readyq_handler)(void *ctx, int state);
+    void *m_readyq_ctx;
 } tms5220_state;
 
 /* Initialize/reset the chip to the given variant (use TMS5220_IS_5220

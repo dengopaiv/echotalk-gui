@@ -969,11 +969,17 @@ void tms5220_set_interrupt_state(tms5220_state *tms, int state)
 
 void tms5220_update_ready_state(tms5220_state *tms)
 {
-	bool state = tms->m_io_ready;
+	/* MAME uses ready_read() here, not m_io_ready directly: in instant
+	 * mode ready_read() also accounts for a full FIFO. It then invokes
+	 * the /READY handler, which the port had dropped along with the log
+	 * statement beside it -- the Echo II card needs that edge to release
+	 * its write latch (a2echoii.cpp's tms_readyq_callback). */
+	bool state = tms5220_ready_read(tms);
 	if (tms->m_ready_pin != state)
 	{
-		
-				tms->m_ready_pin = state;
+		if (tms->m_readyq_handler)
+			tms->m_readyq_handler(tms->m_readyq_ctx, !state); /* /READY is active low */
+		tms->m_ready_pin = state;
 	}
 }
 
@@ -1014,29 +1020,19 @@ void tms5220_wsq_w(tms5220_state *tms, int state, uint8_t pending_byte) {
             return;
         }
         if (!state) {
-            /* high to low -- schedule ready cycle for a write.
-             * MAME's own source only actually implements a flat 16
-             * chip-clock cycles (25us) for every write, with a TODO
-             * admitting real per-command timing (up to 140 cycles for
-             * RDBY) isn't modeled. Applying one flat value to every
-             * write in our port causes real data loss: SPEAK EXTERNAL
-             * and FIFO data need to resolve fast (bytes arrive faster
-             * than a long delay could keep up with, and get clobbered
-             * by the next write otherwise), while Textalker's card
-             * detection needs READ BYTE / READ AND BRANCH specifically
-             * to resolve slowly (empirically ~500us) so its own status
-             * read doesn't land before the command has processed. We
-             * can't wait to find out what DDIS becomes after this byte
-             * resolves (that's the same lag that causes the cascading
-             * clobber problem) -- peek at the byte itself instead. */
+            /* high to low -- schedule ready cycle for a write. MAME uses
+             * a flat 16 chip clocks for every write (with a TODO noting
+             * real per-command timing varies), which at the Echo II's
+             * 640kHz is 25us. An earlier version of this function peeked
+             * at the command byte and used 520us for READ BYTE / READ
+             * AND BRANCH, which was the sample-based delay hack wearing
+             * a different hat; matching MAME exactly is the point of
+             * this path, so the peek is gone. */
+            (void)pending_byte;
             tms->m_io_ready = false;
             tms5220_update_ready_state(tms);
             tms->m_pending_ready_action = 2;
-            {
-                uint8_t masked = pending_byte & 0x70;
-                bool is_slow_read_cmd = (!tms->m_DDIS) && (masked == 0x10 || masked == 0x30);
-                tms->m_pending_ready_us_remaining = is_slow_read_cmd ? 520.0 : 25.0;
-            }
+            tms->m_pending_ready_us_remaining = 25.0; /* 16 clocks @ 640kHz */
         }
     }
 }
@@ -1064,8 +1060,11 @@ void tms5220_tick_ready_timer(tms5220_state *tms, double elapsed_us) {
         if (tms->m_command_register == NOCOMMAND) {
             tms->m_data_latched = false;
             tms5220_data_write(tms, tms->m_write_latch);
+            /* data_write raises m_io_ready itself once the latch is
+             * consumed. Deliberately NOT set here: when the command
+             * register is still busy MAME leaves /READY inactive and
+             * keeps the latch, which is what throttles the writer. */
         }
-        tms->m_io_ready = true;
     }
     tms5220_update_ready_state(tms);
 }
