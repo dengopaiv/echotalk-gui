@@ -158,7 +158,17 @@ iteration and reach the write earlier relative to the frame clock.
 
 ---
 
-# CORRECTION: the "one idle frame vs two" result does not hold up
+# THE CORRECTION BELOW WAS ITSELF WRONG -- see the final section
+
+The "one extra idle frame per restart" result above is **correct**. It
+was doubted on the strength of unreliable log arithmetic, then confirmed
+directly from an unedited MAME recording. Read the final section for the
+resolution; the middle section is kept only so the reasoning is
+traceable.
+
+---
+
+# Interlude: the "one idle frame vs two" result doubted (turned out wrong)
 
 Investigating the above turned up a measurement error in the section
 above it, which is retained only so the reasoning can be followed.
@@ -247,6 +257,87 @@ that against `out/final.wav` (ours, 1717 ms) answers it in one step:
   faster than its own log ordering can account for, and the next place
   to look is the true-timing status latch described above, since that
   is the last structural difference between the two chip models.
+
+---
+
+# RESOLVED: the bug is real, and it is one extra idle frame per restart
+
+The user produced exactly the capture asked for: `x:\a\rbbb.wav`, a
+whole unedited session -- expanded phrase, compressed phrase, then the
+Applesoft prompt that Textalker pronounces "Ready" -- with no silence
+removed anywhere, mid-file or otherwise.
+
+It is 4.469 s at 8 kHz mono, and splits cleanly into three utterances:
+
+```
+expanded    0.000 - 2.200 s   (start slightly clipped by the capture)
+compressed  2.550 - 3.950 s   1.400 s, fully bounded by silence
+"Ready"     4.160 - 4.470 s
+```
+
+The compressed utterance is the reliable one, silence on both sides.
+**It confirms the original 1.414 s figure**, so the first `mame.wav` was
+faithful all along and the assumption that it had been edited was wrong.
+
+## The measurement
+
+Same segmentation applied to both, on comparable audio:
+
+| | MAME | ours |
+|---|---|---|
+| speech | 1110 ms | 1095 ms |
+| gaps | **285 ms** | **475 ms** |
+| total | 1395 ms | 1570 ms |
+
+Speech content matches within 15 ms. The gap structure is where it
+lives:
+
+```
+MAME gaps: 25 20 20 20 20 20 20 20 20 20 20 20 20 20
+ours gaps: 45 25 45 20 45 20 45 20 75 45 20 45 25
+```
+
+The ~20 ms gaps occur in both -- those are natural inter-phoneme pauses
+in the data. The **45 ms gaps are ours alone**, each exactly one 25 ms
+frame longer, and there are seven of them, which accounts for the
+~190 ms difference.
+
+## Why the earlier doubt was misplaced
+
+MAME's log ordering shows SPEAK EXTERNAL being written *after* the
+RESETL4 that clears TALKD, which by the state machine should force two
+idle frames there as well. That reasoning is what prompted the
+correction, and it is wrong for a subtle reason: MAME generates the
+TMS5220 stream **lazily**, catching the chip up to current CPU time when
+the CPU touches it. Log line order therefore does not reliably reflect
+chronology between CPU-side and chip-side events. Our harness advances
+the chip after every 6502 instruction, so the two are not comparable
+that way.
+
+Lesson worth keeping: in this log, only counts are trustworthy (frame
+counts, byte counts, event counts). Anything derived from ordering
+between CPU-side and chip-side lines, or from summing stream updates
+between line numbers, is not.
+
+## Where the fix has to be
+
+Confirmed by measurement rather than inference:
+
+- speech content, byte stream and frame counts are all exact
+- every restart costs us one 25 ms frame more than MAME
+- seven restarts in this phrase, ~190 ms, which is the whole difference
+- phase has been eliminated, FIFO clearing matches, `talk_status`
+  matches
+
+A restart costs one idle frame if `SPEN` is set before the RESETL4 that
+clears `TALKD`, two if after. Ours is landing after. The remaining
+structural difference between the two chip models is that MAME runs in
+true-timing mode -- `rsq_w`/`wsq_w` with a real `/READY` line, and
+`status_r()` returning `m_read_latch` rather than instantaneous status --
+while our port uses MAME's own "hacky instant write mode". That is
+exactly the gap the original HANDOFF flagged, and the dormant
+`tms5220_rsq_w`/`wsq_w`/`tick_ready_timer` code already in
+`tms5220_core.c` is the starting point.
 
 ## Tooling added
 - `ECHOTALK_BYTE_DUMP=<file>` -- every byte written to the Echo II latch,
