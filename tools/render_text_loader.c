@@ -156,8 +156,15 @@ uint8_t read6502(uint16_t address) {
     return mem[address];
 }
 
+/* Byte-stream dump (ECHOTALK_BYTE_DUMP=<file>): every byte Textalker
+ * writes to the Echo II latch, in order. Directly comparable with
+ * MAME's own "Data written to latch of %02x" log lines, which is how
+ * the two implementations' Textalker behaviour gets compared. */
+static FILE *byte_dump = NULL;
+
 void write6502(uint16_t address, uint8_t value) {
     if (address >= 0xC0A0 && address <= 0xC0AF) {
+        if (byte_dump) fprintf(byte_dump, "%02x ", value);
         tms5220_data_w(&tms, value);
         echo_write_count++;
         return;
@@ -239,6 +246,8 @@ int main(int argc, char **argv) {
 
     bank_trace = getenv("ECHOTALK_BANK_TRACE") != NULL;
     chip_trace = getenv("ECHOTALK_CHIP_TRACE") != NULL;
+    { const char *bd = getenv("ECHOTALK_BYTE_DUMP");
+      if (bd) byte_dump = fopen(bd, "w"); }
     { const char *w = getenv("ECHOTALK_PC_WATCH"); if (w) pc_watch = (uint16_t)strtol(w, NULL, 16); }
     { const char *hz = getenv("ECHOTALK_CPU_HZ");
       if (hz) { cycles_per_sample = atof(hz) / CHIP_HZ;
