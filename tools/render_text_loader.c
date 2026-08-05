@@ -53,6 +53,7 @@ static uint8_t mem[0x10000];
 static tms5220_state tms;
 static int readlatch_flag = 1;
 static int true_timing = 1;
+static int arrival_trace = 0;
 
 /* --- Minimal Apple II language-card banking ---
  *
@@ -234,6 +235,16 @@ static FILE *byte_dump = NULL;
 void write6502(uint16_t address, uint8_t value) {
     if (address >= 0xC0A0 && address <= 0xC0AF) {
         if (byte_dump) fprintf(byte_dump, "%02x ", value);
+        /* Arrival phase (ECHOTALK_ARRIVAL=1), in the same shape as the
+         * instrumentation added to MAME's tms5220.cpp data_w, so the
+         * two runs can be compared byte for byte. What matters is the
+         * IP: whether SPEAK EXTERNAL lands early or late within the
+         * frame is what decides one idle frame versus two. */
+        if (arrival_trace)
+            fprintf(stderr, "tms5220_write_data: data %02X at IP=%d PC=%d subcycle=%d "
+                            "(TALKD=%d TALK=%d SPEN=%d DDIS=%d fifo=%d)\n",
+                    value, tms.m_IP, tms.m_PC, tms.m_subcycle,
+                    tms.m_TALKD, tms.m_TALK, tms.m_SPEN, tms.m_DDIS, tms.m_fifo_count);
         if (true_timing) {
             if (!writelatch_flag)
                 fprintf(stderr, "WARNING: echo II latch (%02X) clobbered by %02X "
@@ -327,6 +338,7 @@ int main(int argc, char **argv) {
     chip_trace = getenv("ECHOTALK_CHIP_TRACE") != NULL;
     resetl4_trace = getenv("ECHOTALK_RESETL4") != NULL;
     poll_trace = getenv("ECHOTALK_POLL_TRACE") != NULL;
+    arrival_trace = getenv("ECHOTALK_ARRIVAL") != NULL;
     { const char *bd = getenv("ECHOTALK_BYTE_DUMP");
       if (bd) byte_dump = fopen(bd, "w"); }
     { const char *w = getenv("ECHOTALK_PC_WATCH"); if (w) pc_watch = (uint16_t)strtol(w, NULL, 16); }
