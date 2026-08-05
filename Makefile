@@ -10,28 +10,30 @@
 #
 # --- Windows builds: which environment to run this from ---
 #
-# win64 wants the UCRT runtime (as opposed to the older MSVCRT). In
-# MSYS2 that means running this from the "MSYS2 UCRT64" shell, where
-# the shell's own `gcc` already targets ucrt64 -- just run `make
-# win64` directly, no special flags needed.
+# Short version: on MSYS2, any shell works for either target. Run
+# `make win64` or `make win32` and the right compiler gets selected and
+# then verified. If the wrong one somehow gets used, the build stops
+# with an explanation instead of producing a mislabeled binary.
 #
-# win32 is different: MSYS2 does NOT offer a UCRT-based 32-bit
-# environment (UCRT64 is 64-bit only). For a 32-bit build -- needed
-# because older NVDA releases are 32-bit processes -- run this from
-# the "MSYS2 MinGW32" shell instead, which targets the older MSVCRT
-# runtime. MSVCRT ships on every Windows version (including the older
-# ones a 32-bit NVDA build is likely to target), so this is fine, just
-# a different runtime than win64 links against. `make win32` from that
-# shell works the same way.
+# The two Windows targets deliberately link different C runtimes:
 #
-# Both targets can ALSO be cross-compiled directly from Linux (this is
-# how this Makefile was actually developed and tested), using the
+#   win64 -> UCRT (the newer Universal C Runtime), via MSYS2's UCRT64
+#            toolchain. UCRT ships with Windows 10 and later.
+#   win32 -> MSVCRT (the older runtime), via MSYS2's MINGW32 toolchain.
+#            MSYS2 offers no UCRT-based 32-bit environment, so 32-bit
+#            necessarily means MSVCRT. That is a feature here rather
+#            than a limitation: MSVCRT ships on every Windows version
+#            including the older ones a 32-bit NVDA build is most
+#            likely to run on.
+#
+# Install whichever you're missing with:
+#   pacman -S mingw-w64-ucrt-x86_64-gcc     (for win64)
+#   pacman -S mingw-w64-i686-gcc            (for win32)
+#
+# Both targets can ALSO be cross-compiled from Linux, using the
 # standard x86_64-w64-mingw32-gcc / i686-w64-mingw32-gcc cross
 # compilers (`apt-get install gcc-mingw-w64-x86-64 gcc-mingw-w64-i686`
-# on Debian/Ubuntu). The CC_WIN64 / CC_WIN32 variables below
-# auto-detect which case you're in based on whether MSYSTEM is set
-# (MSYS2 shells set this automatically); override them explicitly if
-# the auto-detection guesses wrong, e.g.:
+# on Debian/Ubuntu). Override the compiler explicitly at any time:
 #   make win64 CC_WIN64=x86_64-w64-mingw32-gcc
 #
 # Both Windows builds are static (-static): no dependency on any
@@ -55,8 +57,42 @@ SOURCES_V13 = tools/render_v13.c \
 SOURCES_RESAMPLE = tools/resample_wav.c
 
 CC_NATIVE ?= gcc
-CC_WIN64  ?= $(if $(MSYSTEM),gcc,x86_64-w64-mingw32-gcc)
-CC_WIN32  ?= $(if $(MSYSTEM),gcc,i686-w64-mingw32-gcc)
+
+# --- Compiler selection ---
+#
+# MSYS2 sets MSYSTEM to name which subsystem shell you launched: UCRT64,
+# MINGW32, MINGW64, CLANG64, or MSYS. Selecting on its mere PRESENCE
+# (which this Makefile used to do) is a trap: `make win32` run from the
+# UCRT64 shell would pick up UCRT64's `gcc`, which is a 64-bit compiler,
+# and silently write a 64-bit binary into build/win32/. Nothing caught
+# it, because `which gcc` succeeds either way.
+#
+# So: select on MSYSTEM's VALUE, and when the current shell is the wrong
+# one, reach for the right compiler by absolute path instead of failing.
+# Every MSYS2 shell can see /ucrt64 and /mingw32 regardless of which
+# subsystem it was launched as, so this makes both Windows targets build
+# correctly from any MSYS2 shell.
+#
+# Whatever gets selected is then verified against `gcc -dumpmachine`
+# below, so a wrong compiler is a hard error rather than a mislabeled
+# binary.
+
+ifeq ($(MSYSTEM),)
+  # Not in MSYS2: assume Linux/Mac cross-compilation.
+  CC_WIN64 ?= x86_64-w64-mingw32-gcc
+  CC_WIN32 ?= i686-w64-mingw32-gcc
+else
+  ifneq ($(filter UCRT64 MINGW64,$(MSYSTEM)),)
+    CC_WIN64 ?= gcc
+  else
+    CC_WIN64 ?= /ucrt64/bin/gcc
+  endif
+  ifeq ($(MSYSTEM),MINGW32)
+    CC_WIN32 ?= gcc
+  else
+    CC_WIN32 ?= /mingw32/bin/gcc
+  endif
+endif
 
 BUILD_DIR = build
 
@@ -66,36 +102,79 @@ all: native
 
 native: $(BUILD_DIR)/native/render_text_real_chip $(BUILD_DIR)/native/render_v13 $(BUILD_DIR)/native/resample_wav
 
+# A MinGW gcc loads its own support DLLs (libgcc, libisl, libmpc, ...)
+# from its own bin directory by way of PATH. If you invoke one MSYS2
+# subsystem's gcc from a different subsystem's shell -- which is exactly
+# what the compiler selection above now does on purpose -- the OTHER
+# subsystem's bin directory sits ahead of it on PATH, holding DLLs with
+# identical names but the wrong architecture. gcc then dies on startup
+# with no diagnostic at all and just a nonzero exit code.
+#
+# Putting the selected compiler's own directory first on PATH for the
+# duration of the recipe fixes it, and is harmless when the shell
+# already matches the target.
+# Only prepend when the compiler was named by path; a bare command name
+# means the current shell is already the right one, and prepending "./"
+# to PATH would be both pointless and untidy.
+WIN64_PATH = $(if $(findstring /,$(CC_WIN64)),$(dir $(CC_WIN64)):,)$$PATH
+WIN32_PATH = $(if $(findstring /,$(CC_WIN32)),$(dir $(CC_WIN32)):,)$$PATH
+
 win64: check-mingw64
 	mkdir -p $(BUILD_DIR)/win64
-	$(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/render_text_real_chip.exe $(SOURCES)
-	$(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/render_v13.exe $(SOURCES_V13)
-	$(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/resample_wav.exe $(SOURCES_RESAMPLE)
+	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/render_text_real_chip.exe $(SOURCES)
+	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/render_v13.exe $(SOURCES_V13)
+	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win64/resample_wav.exe $(SOURCES_RESAMPLE)
 	@echo "win64 build complete: $(BUILD_DIR)/win64/"
 
 win32: check-mingw32
 	mkdir -p $(BUILD_DIR)/win32
-	$(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/render_text_real_chip.exe $(SOURCES)
-	$(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/render_v13.exe $(SOURCES_V13)
-	$(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/resample_wav.exe $(SOURCES_RESAMPLE)
+	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/render_text_real_chip.exe $(SOURCES)
+	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/render_v13.exe $(SOURCES_V13)
+	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -static -o $(BUILD_DIR)/win32/resample_wav.exe $(SOURCES_RESAMPLE)
 	@echo "win32 build complete: $(BUILD_DIR)/win32/"
 
 windows: win64 win32
 
+# Both checks verify the selected compiler EXISTS and actually targets
+# the architecture the target name promises, by asking it directly via
+# -dumpmachine (e.g. "x86_64-w64-mingw32" or "i686-w64-mingw32"). This
+# is what prevents a 64-bit compiler from quietly producing build/win32/
+# contents, which is exactly what the old presence-only check allowed.
+
 check-mingw64:
-	@which $(CC_WIN64) > /dev/null 2>&1 || \
-	  (echo "error: '$(CC_WIN64)' not found."; \
+	@command -v $(CC_WIN64) > /dev/null 2>&1 || \
+	  (echo "error: 64-bit compiler '$(CC_WIN64)' not found."; \
 	   echo "  If cross-compiling from Linux: apt-get install gcc-mingw-w64-x86-64"; \
-	   echo "  If on Windows: run this from the MSYS2 UCRT64 shell."; \
+	   echo "  If on Windows: install it with 'pacman -S mingw-w64-ucrt-x86_64-gcc'"; \
+	   echo "  (any MSYS2 shell will do -- this Makefile finds /ucrt64/bin/gcc itself)."; \
 	   exit 1)
+	@target=`PATH="$(WIN64_PATH)" $(CC_WIN64) -dumpmachine`; \
+	 case "$$target" in \
+	   x86_64-*) echo "win64: using $(CC_WIN64) (target $$target)" ;; \
+	   *) echo "error: '$(CC_WIN64)' targets $$target, which is not 64-bit."; \
+	      echo "  Refusing to write a non-64-bit binary into $(BUILD_DIR)/win64/."; \
+	      echo "  Override explicitly, e.g. make win64 CC_WIN64=/ucrt64/bin/gcc"; \
+	      exit 1 ;; \
+	 esac
 
 check-mingw32:
-	@which $(CC_WIN32) > /dev/null 2>&1 || \
-	  (echo "error: '$(CC_WIN32)' not found."; \
+	@command -v $(CC_WIN32) > /dev/null 2>&1 || \
+	  (echo "error: 32-bit compiler '$(CC_WIN32)' not found."; \
 	   echo "  If cross-compiling from Linux: apt-get install gcc-mingw-w64-i686"; \
-	   echo "  If on Windows: run this from the MSYS2 MinGW32 shell (NOT UCRT64 --"; \
-	   echo "  MSYS2 does not offer a UCRT-based 32-bit environment)."; \
+	   echo "  If on Windows: install it with 'pacman -S mingw-w64-i686-gcc'"; \
+	   echo "  (any MSYS2 shell will do -- this Makefile finds /mingw32/bin/gcc itself)."; \
+	   echo "  Note MSYS2 has no UCRT-based 32-bit environment; 32-bit means MSVCRT."; \
 	   exit 1)
+	@target=`PATH="$(WIN32_PATH)" $(CC_WIN32) -dumpmachine`; \
+	 case "$$target" in \
+	   i?86-*) echo "win32: using $(CC_WIN32) (target $$target)" ;; \
+	   *) echo "error: '$(CC_WIN32)' targets $$target, which is not 32-bit."; \
+	      echo "  This is the classic trap: running 'make win32' from the UCRT64"; \
+	      echo "  shell picks up a 64-bit gcc. Refusing to write a 64-bit binary"; \
+	      echo "  into $(BUILD_DIR)/win32/."; \
+	      echo "  Override explicitly, e.g. make win32 CC_WIN32=/mingw32/bin/gcc"; \
+	      exit 1 ;; \
+	 esac
 
 $(BUILD_DIR)/native/render_text_real_chip: $(SOURCES)
 	mkdir -p $(BUILD_DIR)/native

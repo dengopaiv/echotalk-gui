@@ -108,15 +108,46 @@ So the MSVCRT-vs-UCRT question is settled empirically: identical output
 from both runtimes, and the 32-bit MSVCRT build is the one to prefer for
 distribution breadth.
 
-### One trap worth knowing about
-The Makefile auto-detects the compiler as `$(if $(MSYSTEM),gcc,...)`.
-That is correct when you run `make win32` from the **MinGW32** shell,
-but if you run `make win32` from the **UCRT64** shell it will silently
-use UCRT64's `gcc` and produce a *64-bit* binary in `build/win32/`.
-`check-mingw32` won't catch this, because `which gcc` succeeds either
-way. Until that's hardened, check which shell you're in, or pass the
-compiler explicitly:
-`make win32 CC_WIN32=/s/msys/mingw32/bin/gcc`
+### The wrong-architecture trap (found, then fixed)
+The Makefile used to select its compiler with
+`$(if $(MSYSTEM),gcc,<cross-prefix>)` -- i.e. on the mere *presence* of
+`MSYSTEM`, not its value. That was correct only if you happened to be in
+the matching shell. Running `make win32` from the **UCRT64** shell
+silently used UCRT64's 64-bit `gcc` and wrote a **64-bit** binary into
+`build/win32/`, and `check-mingw32` could not catch it because
+`which gcc` succeeds either way.
+
+Fixed. The Makefile now:
+
+1. **Selects on `MSYSTEM`'s value**, falling back to MSYS2's absolute
+   subsystem paths (`/ucrt64/bin/gcc`, `/mingw32/bin/gcc`) when the
+   current shell isn't the matching one. Every MSYS2 shell can see both
+   trees, so either target now builds correctly from any shell.
+2. **Verifies the selection with `gcc -dumpmachine`** before compiling
+   anything, and refuses to run if the triple doesn't match the target
+   name. The check prints which compiler it chose, so the build is
+   self-documenting.
+
+Verified all four combinations (`win64`/`win32` from the UCRT64 and
+MINGW32 shells, all producing correctly-architected binaries), plus both
+deliberate-mismatch cases (`make win32 CC_WIN32=/ucrt64/bin/gcc` and the
+reverse), which now abort with an explanation instead of building.
+
+### Gotcha found while fixing the above: cross-shell DLL hell
+Invoking one subsystem's gcc from another subsystem's shell fails in a
+maximally unhelpful way. A MinGW gcc loads its support DLLs (libgcc,
+libisl, libmpc, ...) via `PATH`, and the *other* subsystem's `bin`
+directory sits ahead of it holding same-named DLLs of the wrong
+architecture. The result is that **gcc dies at startup producing no
+diagnostic whatsoever** -- no error text, just exit code 1. Worth
+recognising on sight, because nothing about it points at PATH.
+
+Interestingly `gcc -dumpmachine` still worked in this state (the driver
+alone resolves), so only the actual compile failed -- meaning the
+architecture check passed and then the build collapsed silently. The fix
+is to prepend the selected compiler's own directory to `PATH` for the
+duration of each recipe, which the Makefile now does via
+`WIN64_PATH`/`WIN32_PATH`.
 
 ## What's NOT here yet
 This builds the existing *test/diagnostic tools*, which speak text
