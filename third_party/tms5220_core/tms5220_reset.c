@@ -79,7 +79,17 @@ void tms5220_reset(tms5220_state *tms, int variant)
     memset(tms->m_current_k, 0, sizeof(tms->m_current_k));
 
     tms->m_inhibit = true;
-    tms->m_subcycle = tms->m_c_variant_rate = tms->m_pitch_count = tms->m_PC = 0;
+    tms->m_subcycle = tms->m_pitch_count = tms->m_PC = 0;
+    /* MAME clears m_c_variant_rate here, because on real silicon the
+     * only way to set it is the SET RATE command, which the host would
+     * reissue. EchoTalk uses it as a speech-rate control set from
+     * outside, and Textalker sends a RESET between every segment -- so
+     * clearing it would wipe the setting after the first utterance,
+     * which is exactly what happened when this was first tried.
+     * m_configured_rate is the host's value and survives reset; it is
+     * zero unless something sets it, so default behaviour is unchanged
+     * and identical to MAME. */
+    tms->m_c_variant_rate = tms->m_configured_rate;
     tms->m_subc_reload = 1; /* FORCE_SUBC_RELOAD = 1: normal (not SPKSLOW) speech rate */
     tms->m_OLDE = tms->m_OLDP = true;
     {

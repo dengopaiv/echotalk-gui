@@ -1,4 +1,4 @@
-/*
+﻿/*
  * tms5220_core.h
  *
  * Standalone C port of MAME's TMS5220/TMS5200/TMS5220C speech synthesis
@@ -172,6 +172,11 @@ typedef struct tms5220_state {
      * m_DDIS) never clears again for the rest of the utterance, so
      * wsq_w can use it instead to avoid that lag. */
     bool m_seen_ddis;
+
+    /* Host-set speech rate, 0-3, restored into m_c_variant_rate on
+     * reset so it survives the RESET commands Textalker issues between
+     * segments. Zero unless set, giving MAME-identical behaviour. */
+    uint8_t m_configured_rate;
 
     /* /READY handler, the equivalent of MAME's m_readyq_handler devcb.
      * Called on every change of the ready pin with the ACTIVE-LOW value

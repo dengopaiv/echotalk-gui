@@ -402,6 +402,16 @@ int main(int argc, char **argv) {
     true_timing = getenv("ECHOTALK_TRUE_TIMING") != NULL;
 
     tms5220_reset(&tms, TMS5220_IS_5220);
+
+    /* Frame rate. Written after reset because reset clears it. This is
+     * the field the SET RATE command would write on a 5220C; on a plain
+     * 5220 that command is a NOP, so the field stays 0 and every frame
+     * gets all 8 interpolation periods. Setting it directly is an
+     * emulator capability -- real Echo II hardware could not do this. */
+    tms.m_configured_rate = tms.m_c_variant_rate = (uint8_t)g_ropts.frame_rate;
+    if (g_ropts.frame_rate)
+        VLOG("Frame rate %d: %d interpolation periods per frame\n",
+             g_ropts.frame_rate, 8 - 2 * g_ropts.frame_rate);
     if (true_timing) {
         /* Installed after reset so the reset's own update_ready_state
          * does not fire into it. Then mirror a2echoii's reset_from_bus:

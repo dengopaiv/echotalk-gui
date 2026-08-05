@@ -98,6 +98,52 @@ Caveats to be honest about:
 - It is an **emulator capability, not something a real Echo II could
   do** -- that card has a plain 5220. Worth saying plainly in any UI.
 
+### MEASURED: the lever works, the speech does not follow it
+
+Implemented as `--frame-rate N` and measured on the hedge trimmer story.
+**The predicted speedups do not materialise:**
+
+| rate | periods | predicted | expanded | compressed |
+|---|---|---|---|---|
+| 0 | 8 | 1.00x | 37.32 s | 23.60 s |
+| 1 | 6 | 1.33x | 35.91 s (1.04x) | 22.78 s (1.04x) |
+| 2 | 4 | 2.00x | 34.51 s (1.08x) | 21.96 s (1.07x) |
+| 3 | 2 | 4.00x | 33.10 s (1.13x) | 21.14 s (1.12x) |
+
+The mechanism itself is confirmed working: the frame reload at
+`IP == 0 && PC == 12 && subcycle == 1` does set `m_IP` from
+`reload_table[m_c_variant_rate & 3]`, so frames really do run 4 periods
+at rate 2 rather than 8.
+
+One thing had to be fixed to get even this far: the RESET command calls
+`tms5220_reset()`, which cleared `m_c_variant_rate`, and **Textalker
+sends a RESET between every segment** -- so the setting was wiped after
+the first utterance. `m_configured_rate` now survives reset and is
+restored into `m_c_variant_rate`, defaulting to zero so behaviour is
+unchanged and MAME-identical when unused.
+
+**Why the speech does not speed up is not yet established.** The leading
+explanation is that the chip now drains the FIFO faster than Textalker
+refills it, starves, and stalls -- so Textalker's flow control sets the
+pace, not the frame clock. Consistent with that, raising the emulated
+6502 clock does *not* rescue it:
+
+```
+rate2, CPU 1x  21.96s      rate3, CPU 4x  20.94s
+rate2, CPU 2x  21.82s      rate3, CPU 8x  52.14s  (breaks down)
+rate2, CPU 4x  21.76s
+```
+
+So neither the chip's consumption rate nor the 6502's production rate is
+the limiter on its own, and something in the interaction is. That is the
+thing to understand before spending effort on the accumulator, since the
+accumulator would run into exactly the same wall.
+
+**This is why phasing put the cheap version first.** It cost one option
+flag and one reset fix to learn that frame-rate manipulation does not
+give useful rate control, rather than discovering it after building the
+continuous version.
+
 ### For continuous control, an accumulator in the core
 
 Four steps, all faster than normal, is not enough for a screen reader

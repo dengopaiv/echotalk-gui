@@ -78,11 +78,18 @@ typedef struct {
     int repeat_filter_fix;  /* send REPEAT_FILTER_DISABLE during init */
     int raw_input;          /* skip text preparation */
     int chunk_size;         /* 0 = do not chunk */
+    /* TMS5220 frame rate, 0-3, written straight into m_c_variant_rate.
+     * parse_frame reloads m_IP from reload_table[rate & 3] = {0,2,4,6},
+     * so the frame runs that many fewer interpolation periods: 8, 6, 4
+     * or 2, i.e. 1.00x, 1.33x, 2.00x, 4.00x speed. Pitch is unaffected,
+     * since the pitch period is counted in samples and nothing here
+     * touches it. 0 is the normal, hardware-accurate setting. */
+    int frame_rate;
     const char *pos[8];
     int npos;
 } render_opts;
 
-static render_opts g_ropts = { 0, 1, 1, 1, 0, DEFAULT_CHUNK_SIZE, { 0 }, 0 };
+static render_opts g_ropts = { 0, 1, 1, 1, 0, DEFAULT_CHUNK_SIZE, 0, { 0 }, 0 };
 
 /* --- Shared capture buffer ---
  * Holds the samples plus, in parallel, whether the chip was speaking
@@ -133,6 +140,9 @@ static inline void render_usage(const char *prog, const char *argspec) {
         "                      N characters (default %d)\n"
         "      --no-chunk      never split; lets Textalker's own buffer decide,\n"
         "                      which can break speech mid-word\n"
+        "      --frame-rate N  TMS5220 frame rate 0-3: 8, 6, 4 or 2 interpolation\n"
+        "                      periods, so 1.00x, 1.33x, 2.00x, 4.00x speed with\n"
+        "                      pitch unchanged. 0 is hardware-accurate (default)\n"
         "  -h, --help          this message\n",
         prog, argspec, DEFAULT_CHUNK_SIZE);
 }
@@ -149,6 +159,7 @@ static inline int render_parse_args(int argc, char **argv, int need,
         else if (!strcmp(arg, "--no-chunk")) o->chunk_size = 0;
         else if (!strcmp(arg, "--keep-chunk-gaps")) o->gap_trim = 0;
         else if (!strcmp(arg, "--chunk") && i + 1 < argc) o->chunk_size = atoi(argv[++i]);
+        else if (!strcmp(arg, "--frame-rate") && i + 1 < argc) o->frame_rate = atoi(argv[++i]) & 3;
         else if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             render_usage(argv[0], argspec);
             exit(0);
