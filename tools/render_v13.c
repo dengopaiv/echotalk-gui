@@ -213,27 +213,40 @@ int main(int argc, char **argv) {
      * bank selected, so jumping straight at the OBJ entry lands in the
      * ROM shadow rather than in Textalker. The trampoline's own $C08B
      * read is what switches the card back in. */
-    uint16_t entry = 0;
-    for (uint32_t addr = 0x0200; addr <= 0xBFF9; addr++) {
-        /* Skip the loader's own image. It holds the templates it copies
-         * from, and those must not be mistaken for the installed hook:
-         * v3.1.3's first template is JMP $D003, the *init* entry, so
-         * taking the first match found would pick the wrong one. Only
-         * the copy the loader placed in low memory is the character
-         * entry point. */
-        if (addr >= 0x9300 && addr < 0x9300 + nr) continue;
-        if (mem[addr] == 0x48 && mem[addr + 1] == 0xAD &&
-            mem[addr + 2] == 0x8B && mem[addr + 3] == 0xC0 &&
-            mem[addr + 4] == 0x4C) {
-            entry = (uint16_t)addr;
-            VLOG("  entry trampoline at $%04X -> JMP $%02X%02X\n",
-                 entry, mem[addr + 6], mem[addr + 5]);
-            break;
-        }
+    /* Ask Textalker where its character entry is -- see the same block
+     * in render_text_loader.c. DOS's hook slot at $A22B is patched to
+     * JMP $BA69 in both versions, and both branch there on Z. With Z
+     * set, v1.3 falls through to code that stores $BA82 into the Apple
+     * II character-output vector CSWL at $36/$37, while v3.1.3 reaches
+     * its init, which installs $BA7C there. The vector is the answer in
+     * both cases. */
+    uint16_t entry;
+    {
+        uint8_t prev_lo = mem[0x0036], prev_hi = mem[0x0037];
+        sp = 0xFD;
+        status |= 0x02; /* Z set: take the install path */
+        run_to_halt(0xBA69, 200000, 0x0203, 0, 0);
+        entry = (uint16_t)(mem[0x0036] | (mem[0x0037] << 8));
+        VLOG("  CSWL after $BA69 install: $%04X (was $%02X%02X)\n",
+             entry, prev_hi, prev_lo);
     }
-    if (!entry) {
-        fprintf(stderr, "ERROR: loader installed no entry trampoline "
-                        "(PHA/LDA $C08B/JMP) -- cannot speak\n");
+
+    if (g_ropts.verbose) {
+        fprintf(stderr, "  $A22B (DOS hook slot): %02X %02X %02X\n",
+                mem[0xA22B], mem[0xA22C], mem[0xA22D]);
+        fprintf(stderr, "  $BA69:");
+        for (uint16_t addr = 0xBA69; addr <= 0xBA90; addr++)
+            fprintf(stderr, " %02X", mem[addr]);
+        fprintf(stderr, "\n");
+    }
+
+    /* Validate: the vector must point at a PHA / LDA $C08B / JMP
+     * trampoline. If not, the install path did not run. */
+    if (!(mem[entry] == 0x48 && mem[entry + 1] == 0xAD &&
+          mem[entry + 2] == 0x8B && mem[entry + 3] == 0xC0 &&
+          mem[entry + 4] == 0x4C)) {
+        fprintf(stderr, "ERROR: CSWL ($%04X) does not point at an entry "
+                        "trampoline -- Textalker did not install itself\n", entry);
         return 1;
     }
 

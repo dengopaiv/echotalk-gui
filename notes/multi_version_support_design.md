@@ -78,18 +78,47 @@ The scan is still worth keeping. It reliably yields the OBJ load address
 (the page of the targets), it proves the loader ran, and it enumerates
 the candidates. It just cannot pick among them by pattern alone.
 
-Two ways to finish the job, neither yet implemented:
+### Resolved: ask Textalker, via the DOS hook chain
 
-- **Probe the candidates.** Boot once, then feed each candidate a short
-  test string and keep the one that produces Echo-card writes. This is
-  exactly how `$D006` was originally identified in session 3, it needs
-  no version knowledge at all, and boot is milliseconds. A wrong
-  candidate is caught by the existing step budget and wild-jump trap.
-- **Follow the DOS hook chain.** Both versions patch `$A22B` to
-  `JMP $BA69` -- the same fixed address in both, per the session 2 and
-  v1.3 compatibility notes. Whatever that chain reaches is by definition
-  the character-output hook. Cheaper than probing if it holds up, and
-  worth checking first.
+The second idea holds, and it is better than probing. **Implemented and
+working for both versions.**
+
+Both loaders patch DOS's hook slot at `$A22B` to `JMP $BA69`, and the
+code at `$BA69` branches on the Z flag in both. Disassembled after boot:
+
+```
+v3.1.3  $BA69:  BEQ $BA72            -> PHA / LDA $C08B / JMP $D003 (init)
+v1.3    $BA69:  BNE $BA7F
+        $BA6B:  JSR $BCDF
+        $BA6E:  LDA #$82 / STA $36
+        $BA72:  LDA #$BA / STA $37   -> CSWL := $BA82
+        $BA76:  LDA #$F0 / STA $38
+        $BA7A:  LDA #$BC / STA $39   -> KSWL := $BCF0
+```
+
+So with **Z set**, v1.3 falls through to code that writes its character
+entry into the Apple II character-output vector CSWL (`$36`/`$37`),
+while v3.1.3 takes the branch into its init trampoline, and `$D682`
+installs *its* character entry into the same vector -- the behaviour
+session 3 documented from the other direction.
+
+Either way the answer lands in CSWL. So:
+
+1. Run the loader.
+2. Call `$BA69` once with the Z flag set.
+3. Read `$36`/`$37`. That is the character entry.
+
+Confirmed: **`$BA7C` for v3.1.3 and `$BA82` for v1.3**, both matching
+what the two harnesses had hardcoded, and both agreeing with the
+trampoline scan. Validated further by checking that the vector really
+points at a `PHA / LDA $C08B / JMP` trampoline; if it does not, the
+install path did not run and the harness fails loudly rather than
+speaking silence.
+
+This is the machine's own mechanism, not a heuristic. Any Textalker
+build that installs itself the way DOS expects will be found by it,
+which is precisely the property needed for 3.1.2 or 3.1.4 to work
+without being recognised individually.
 
 ## Language-card banking should be unified
 
