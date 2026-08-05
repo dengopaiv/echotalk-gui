@@ -28,6 +28,22 @@ static uint8_t mem[0x10000];
 static tms5220_state tms;
 static int readlatch_flag = 1;
 
+/* --- Language-card banking, same model as render_text_loader.c ---
+ *
+ * v1.3's OBJ occupies $D400-$FFFF, inside the language card, and the
+ * trampoline its loader installs reads $C08B exactly as v3.1.3's does.
+ * So v1.3 bank-switches too, and this harness only got away without
+ * modelling it because it never exercised the ROM-side exit path --
+ * precisely the state the v3.1.3 harness was in before the loader work.
+ *
+ * With banking modelled, the monitor addresses the loader touches that
+ * fall inside the window ($FC58, $FBFD, and the $FBB3 signature byte)
+ * resolve against an all-RTS shadow instead of being written over
+ * Textalker's own image. See notes/multi_version_support_design.md. */
+static uint8_t rom_shadow[0x3000];
+static int lc_ram_enabled = 1;
+static inline int is_lc_space(uint16_t address) { return address >= 0xD000; }
+
 #define audio_count render_audio_count()
 
 #define CPU_HZ      1020484.0
@@ -54,6 +70,10 @@ uint8_t read6502(uint16_t address) {
         readlatch_flag = !readlatch_flag;
         return retval;
     }
+    if (address == 0xC08B) { lc_ram_enabled = 1; return 0; }
+    if (address == 0xC08A) { lc_ram_enabled = 0; return 0; }
+    if (is_lc_space(address) && !lc_ram_enabled)
+        return rom_shadow[address - 0xD000];
     return mem[address];
 }
 
@@ -63,6 +83,11 @@ void write6502(uint16_t address, uint8_t value) {
         echo_write_count++;
         return;
     }
+    if (address == 0xC08B) { lc_ram_enabled = 1; return; }
+    if (address == 0xC08A) { lc_ram_enabled = 0; return; }
+    /* Writes always land in RAM; the ROM bank is read-only, so
+     * Textalker's image can never be corrupted by a write issued while
+     * the ROM bank happens to be selected. */
     mem[address] = value;
 }
 
@@ -139,12 +164,21 @@ int main(int argc, char **argv) {
     long tlen = 0;
     uint8_t *text = render_load_input(&g_ropts, in_path, &tlen);
 
-    /* Stub the handful of real Apple ROM monitor routines the loader
-     * calls early on (apparent screen/calibration text output, not
-     * detection logic) as harmless RTS. */
-    mem[0xFC58] = 0x60; /* RTS */
-    mem[0xFBFD] = 0x60; /* RTS */
+    /* The stand-in monitor ROM: every address returns immediately. No
+     * Apple ROM code is reproduced -- screen output and the like are
+     * simply nothing in a headless renderer, and RTS is the correct
+     * nothing because callers expect control back. This replaces the
+     * hand-placed $FC58/$FBFD stubs, which used to be written straight
+     * over Textalker's own image. */
+    memset(rom_shadow, 0x60, sizeof(rom_shadow));
+    rom_shadow[0xFBB3 - 0xD000] = 0xEA; /* hardware-signature byte */
+
+    /* Below $D000, so outside the window and unaffected by banking. */
     mem[0x9EBD] = 0x60; /* RTS */
+
+    /* Entered from DOS with ROM selected, as v3.1.3's loader is. */
+    lc_ram_enabled = 0;
+
     install_wild_jump_trap();
 
     tms5220_reset(&tms, TMS5220_IS_5220);
@@ -168,6 +202,41 @@ int main(int argc, char **argv) {
     VLOG("  $EC0B (last successful candidate low byte, 0 if none): $%02X\n", mem[0xEC0B]);
     VLOG("  $F48F (install-success flag): $%02X\n", mem[0xF48F]);
 
+    /* Find the per-character entry the way the multi-version design
+     * calls for, rather than hardcoding it: the loader installs a
+     * trampoline of the form PHA / LDA $C08B / JMP <entry>, and its
+     * address is what a caller should jump to with the character in A.
+     * Locating it also proves the loader ran, and it works the same way
+     * for v3.1.3, which is what lets one code path serve both.
+     *
+     * This matters more than it looks: the loader returns with the ROM
+     * bank selected, so jumping straight at the OBJ entry lands in the
+     * ROM shadow rather than in Textalker. The trampoline's own $C08B
+     * read is what switches the card back in. */
+    uint16_t entry = 0;
+    for (uint32_t addr = 0x0200; addr <= 0xBFF9; addr++) {
+        /* Skip the loader's own image. It holds the templates it copies
+         * from, and those must not be mistaken for the installed hook:
+         * v3.1.3's first template is JMP $D003, the *init* entry, so
+         * taking the first match found would pick the wrong one. Only
+         * the copy the loader placed in low memory is the character
+         * entry point. */
+        if (addr >= 0x9300 && addr < 0x9300 + nr) continue;
+        if (mem[addr] == 0x48 && mem[addr + 1] == 0xAD &&
+            mem[addr + 2] == 0x8B && mem[addr + 3] == 0xC0 &&
+            mem[addr + 4] == 0x4C) {
+            entry = (uint16_t)addr;
+            VLOG("  entry trampoline at $%04X -> JMP $%02X%02X\n",
+                 entry, mem[addr + 6], mem[addr + 5]);
+            break;
+        }
+    }
+    if (!entry) {
+        fprintf(stderr, "ERROR: loader installed no entry trampoline "
+                        "(PHA/LDA $C08B/JMP) -- cannot speak\n");
+        return 1;
+    }
+
     /* v1.3 predates several v3.1.3 commands and silently discards any it
      * does not recognise (see HANDOFF.md on the $D857 dispatch chain),
      * so sending this is safe whether or not v1.3 implements it --
@@ -175,7 +244,8 @@ int main(int argc, char **argv) {
     if (g_ropts.repeat_filter_fix) {
         for (const char *p = REPEAT_FILTER_DISABLE; *p; p++) {
             sp = 0xFD;
-            run_to_halt(0xD400, 5000000, 0x0201, 1, (uint8_t)(*p | 0x80));
+            a = (uint8_t)(*p | 0x80);
+            run_to_halt(entry, 5000000, 0x0201, 0, 0);
         }
         VLOG("Sent repeat-filter disable (Ctrl-E 99 R)\n");
     }
@@ -186,7 +256,8 @@ int main(int argc, char **argv) {
          * every CR) so its think-time dead air can be trimmed. */
         if (i == 0 || text[i - 1] == '\r') render_mark_utterance();
         sp = 0xFD;
-        int s = run_to_halt(0xD400, 5000000, 0x0201, 1, ch);
+        a = ch;
+        int s = run_to_halt(entry, 5000000, 0x0201, 0, 0);
         if (s >= 5000000) {
             fprintf(stderr, "WARNING: char #%ld ($%02X) hit step budget -- may be incomplete\n", i, ch);
         }

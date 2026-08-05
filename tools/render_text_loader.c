@@ -472,6 +472,32 @@ int main(int argc, char **argv) {
     if (mem[0xFD87] != 0x1F)
         fprintf(stderr, "WARNING: card detection did not succeed (FD87=$%02X)\n", mem[0xFD87]);
 
+    /* Locate the per-character entry rather than hardcoding $BA7C: the
+     * loader installs a PHA / LDA $C08B / JMP <entry> trampoline, and
+     * finding it works identically for v1.3 (which lands at $BA82), so
+     * one code path can serve both versions. The loader's own image is
+     * skipped because it holds the templates it copies from, and the
+     * first of those is JMP $D003 -- the init entry, not this one. */
+    /* List the trampolines the loader installed. v3.1.3 installs
+     * several -- one per public entry -- so this is a diagnostic, not a
+     * way to choose. Taking the first match lands on JMP $D003, the
+     * init entry, and produces silence. See
+     * notes/multi_version_support_design.md: identifying which
+     * trampoline is the character hook needs probing, not pattern
+     * matching. The character entry for v3.1.3 is the JMP $D006 one. */
+    uint16_t entry = 0xBA7C;
+    if (g_ropts.verbose) {
+        for (uint32_t addr = 0x0200; addr <= 0xBFF9; addr++) {
+            if (addr >= 0x9300 && addr < 0x9300 + nr) continue;
+            if (mem[addr] == 0x48 && mem[addr + 1] == 0xAD &&
+                mem[addr + 2] == 0x8B && mem[addr + 3] == 0xC0 &&
+                mem[addr + 4] == 0x4C)
+                fprintf(stderr, "  trampoline at $%04X -> JMP $%02X%02X%s\n",
+                        (unsigned)addr, mem[addr + 6], mem[addr + 5],
+                        addr == entry ? "   <- character entry" : "");
+        }
+    }
+
     /* The loader normally installs a trampoline at $BA7C ending in
      * JMP $D006. If it left $BA83/$BA88 untouched, fall back to the
      * hand-written PLA/RTS stubs the direct-call harness uses -- see
@@ -500,7 +526,7 @@ int main(int argc, char **argv) {
     #define SEND_CHAR(c) do {                                     \
         sp = 0xFD;                                                \
         a = (uint8_t)((c) | 0x80);                                \
-        run_to_halt(0xBA7C, 5000000, 0x0201, 0, 0);               \
+        run_to_halt(entry, 5000000, 0x0201, 0, 0);               \
     } while (0)
 
     /* Disable the repeat-character filter now that init is complete and
@@ -518,7 +544,7 @@ int main(int argc, char **argv) {
         if (i == 0 || text[i - 1] == '\r') render_mark_utterance();
         sp = 0xFD;
         a = ch;
-        int s = run_to_halt(0xBA7C, 5000000, 0x0201, 0, 0);
+        int s = run_to_halt(entry, 5000000, 0x0201, 0, 0);
         if (s >= 5000000) {
             fprintf(stderr, "WARNING: char #%ld ($%02X) hit step budget -- may be incomplete\n", i, ch);
         }
