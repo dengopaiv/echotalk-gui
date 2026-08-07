@@ -33,6 +33,11 @@ authoritative**, not the numbers here.
 
 ## Design and architecture
 
+- `ctrl_d_driver_commands.md` — driver settings embedded in the text
+  stream, in the shape of Textalker's own Ctrl-E commands. Explains why
+  a command has to end the current utterance, and records a latent
+  chunker-truncation bug it uncovered.
+
 - `library_plan_rate_and_pitch.md` — the rate, pitch and resampling
   design behind the library's controls, and a worked example of a
   confident negative result that was wrong: frame-rate control was

@@ -31,6 +31,7 @@ int main(int argc, char **argv) {
     double clock_mult = 1.0;
     int frame_rate = 0, compressed = 0, pitch = -1, volume = -1;
     int word_delay = -1, repeat_filter = -1;
+    int chunk = -1, raw = 0;
     const char *text_file = NULL;
     const char *pos[4]; int npos = 0;
 
@@ -42,6 +43,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--clock") && i + 1 < argc) clock_mult = atof(argv[++i]);
         else if (!strcmp(argv[i], "--frame-rate") && i + 1 < argc) frame_rate = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--compressed")) compressed = 1;
+        else if (!strcmp(argv[i], "--chunk") && i + 1 < argc) chunk = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--no-chunk")) chunk = 0;
+        else if (!strcmp(argv[i], "--raw")) raw = 1;
         else if (!strcmp(argv[i], "--pitch") && i + 1 < argc) pitch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc) volume = atoi(argv[++i]);
         else if (argv[i][0] == '-' && argv[i][1]) {
@@ -63,7 +67,17 @@ int main(int argc, char **argv) {
             "  --volume N         0-15 (default 12)\n"
             "  --word-delay N     0-15 pause between words (default 0)\n"
             "  --repeat-filter N  0-99 repeat-character threshold\n"
-            "                     (default 99, i.e. effectively off)\n", argv[0]);
+            "                     (default 99, i.e. effectively off)\n"
+            "  --chunk N          split long lines every N characters (default 80)\n"
+            "  --no-chunk         never split; see the warning it prints\n"
+            "  --raw              send bytes to Textalker untouched\n"
+            "\n"
+            "The text may also carry Ctrl-D driver commands: 0x04, an optional\n"
+            "number, then a letter. 2F frame rate, 0.75C clock, 0B chunking off,\n"
+            "1R raw on; a bare letter restores that setting's default, and a\n"
+            "doubled 0x04 is one literal 0x04. Each command ends the current\n"
+            "utterance, so what precedes it speaks at the old settings.\n",
+            argv[0]);
         return 1;
     }
 
@@ -96,12 +110,30 @@ int main(int argc, char **argv) {
     if (volume >= 0 && echotalk_set_volume(et, volume)) fprintf(stderr, "bad --volume\n");
     if (word_delay >= 0 && echotalk_set_word_delay(et, word_delay)) fprintf(stderr, "bad --word-delay\n");
     if (repeat_filter >= 0 && echotalk_set_repeat_filter(et, repeat_filter)) fprintf(stderr, "bad --repeat-filter\n");
+    if (chunk >= 0 && echotalk_set_chunk_size(et, (unsigned)chunk)) fprintf(stderr, "bad --chunk\n");
+    if (raw) echotalk_set_raw(et, 1);
 
     if (echotalk_speak(et, text) != 0) {
         fprintf(stderr, "echotalk_speak failed\n");
         echotalk_destroy(et);
         return 1;
     }
+
+    /* Bad Ctrl-D commands are swallowed rather than spoken, which is
+     * right for a screen reader but leaves a typo invisible. This is
+     * the only place it surfaces. */
+    unsigned bad = echotalk_command_errors(et);
+    if (bad)
+        fprintf(stderr, "warning: %u malformed or unknown Ctrl-D command%s "
+                        "ignored\n", bad, bad == 1 ? "" : "s");
+
+    /* Chunking off is not just "longer lines" -- Textalker's own line
+     * buffer bound is never initialised under this emulation, so its
+     * auto-flush point is undefined. Say so, however it got turned off. */
+    if (echotalk_chunk_size(et) == 0)
+        fprintf(stderr, "warning: chunking is off; text past Textalker's own "
+                        "line buffer reaches an undefined flush point, and "
+                        "how it breaks is uncharacterised\n");
 
     /* Pull in small blocks, the way an audio callback would. */
     size_t cap = 65536, n = 0;

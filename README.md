@@ -32,6 +32,9 @@ is left is packaging it as a DLL and making it stream.**
 - The library is in `src/echotalk.[ch]`: create it with a loader and OBJ
   image, set pitch, volume, word delay, repeat filter, expanded or
   compressed speech, speed and output rate, then speak and pull PCM.
+- Driver settings can also be embedded in the text as Ctrl-D commands,
+  mirroring the shape of Textalker's own Ctrl-E ones — `\x04 2F` for
+  frame rate, `\x04 0.75C` for the clock, and so on.
 
 Four controls cover rate and pitch independently — Textalker's pitch
 command changes pitch alone, the TMS5220 frame rate changes speed alone,

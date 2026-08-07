@@ -89,6 +89,29 @@ int echotalk_set_volume(echotalk *et, int volume);
  * discards it, so it has no effect there. */
 int echotalk_set_word_delay(echotalk *et, int delay);
 
+/* Longest run of text handed to Textalker between CRs, in characters.
+ *
+ * Textalker speaks when its line buffer fills, and that boundary lands
+ * wherever it lands -- including mid-word. Worse, in this emulation its
+ * own buffer bound is never initialised (nothing plays the part of DOS
+ * setting up a screen), so its auto-flush point is undefined. Chunking
+ * ahead of it is what keeps text splitting at clause and word
+ * boundaries instead. Default 80.
+ *
+ * 0 disables chunking entirely. That is not merely "longer lines": it
+ * removes the only thing standing between long text and Textalker's
+ * uncharacterised flush behaviour. Supported for experimentation, but
+ * do not use it for anything that has to be right. */
+int echotalk_set_chunk_size(echotalk *et, unsigned chars);
+unsigned echotalk_chunk_size(const echotalk *et);
+
+/* Raw mode: 0 (default) prepares text as echotalk_speak() describes,
+ * 1 passes bytes to Textalker untouched. Raw mode is how you send
+ * Ctrl-E command sequences that contain bytes text preparation would
+ * otherwise fold away; note that ordinary Ctrl-E commands survive
+ * preparation already and do not need it. */
+int echotalk_set_raw(echotalk *et, int raw);
+
 /* Threshold for Textalker's repeat-character filter, 0-99.
  *
  * The filter exists so a decorative run like "*****" is not read out
@@ -106,8 +129,49 @@ int echotalk_set_repeat_filter(echotalk *et, int threshold);
  * reduces it to the 7-bit ASCII Textalker understands. Long lines are
  * split at clause then word boundaries so Textalker's own buffer never
  * decides where to break, which it would otherwise sometimes do
- * mid-word. Returns 0 on success. */
+ * mid-word. Returns 0 on success.
+ *
+ * --- Ctrl-D driver commands ---
+ *
+ * The text may contain driver commands introduced by Ctrl-D (0x04),
+ * deliberately echoing the shape of Textalker's own Ctrl-E commands:
+ * an optional number, then a letter.
+ *
+ *   \x04 2F     frame rate 2          \x04F   frame rate back to default
+ *   \x04 0.75C  clock multiplier      \x04C   clock back to 1.0
+ *   \x04 0B     chunking off          \x04 80B  chunk at 80 characters
+ *   \x04 1R     raw text on           \x04 0R   raw text off
+ *   \x04\x04    one literal 0x04 byte, spoken rather than obeyed
+ *
+ * The namespaces are disjoint on purpose: Ctrl-E addresses the 1985
+ * synthesiser, Ctrl-D addresses the driver around it. Ctrl-E sequences
+ * survive text preparation untouched, so there is no need to duplicate
+ * them here. Note that Ctrl-E's own letters differ -- Ctrl-E F is
+ * flatness and Ctrl-E C is compressed, where Ctrl-D F is frame rate and
+ * Ctrl-D C is clock.
+ *
+ * A command ENDS THE CURRENT UTTERANCE. Textalker buffers a whole line
+ * and does not synthesise anything until the terminating CR arrives, so
+ * a command's position in the text would otherwise bear no relation to
+ * its position in the audio: applying it the moment it is seen would
+ * apply it to everything already buffered. Flushing first means what
+ * precedes the command speaks at the old settings and what follows it
+ * at the new. The cost is an utterance boundary, and hence a small
+ * pause, wherever a command appears.
+ *
+ * Settings changed this way PERSIST past the end of this call, exactly
+ * as Ctrl-E commands persist inside Textalker.
+ *
+ * A malformed or unknown command is swallowed, never spoken -- a screen
+ * reader reading its own control codes aloud would be worse than the
+ * command being ignored -- and counted, see echotalk_command_errors(). */
 int echotalk_speak(echotalk *et, const char *text);
+
+/* Number of malformed or unknown Ctrl-D commands seen since the last
+ * call to echotalk_clear_command_errors(). Since bad commands are
+ * silently dropped, this is the only way a host can notice a typo. */
+unsigned echotalk_command_errors(const echotalk *et);
+void echotalk_clear_command_errors(echotalk *et);
 
 /* Copies up to `frames` samples of 16-bit mono PCM into `out` and
  * returns how many were written; 0 means the queue is drained. */

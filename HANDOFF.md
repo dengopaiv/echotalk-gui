@@ -148,7 +148,36 @@ while ((n = echotalk_read(et, buf, 1024)) > 0) { /* 16-bit mono PCM */ }
 
 Plus `echotalk_set_pitch` (0-63), `_volume` (0-15), `_word_delay`
 (0-15, **no effect under v1.3**, which never implemented that command),
-and `_repeat_filter` (0-99, default 99 so it never triggers).
+`_repeat_filter` (0-99, default 99 so it never triggers), `_chunk_size`
+(0 disables chunking) and `_raw`.
+
+### Ctrl-D driver commands
+
+Driver settings are also reachable from inside the text, in the shape of
+Textalker's own Ctrl-E commands: `\x04`, optional whitespace, an
+optional number, a letter. `notes/ctrl_d_driver_commands.md`
+
+```
+\x04 2F  frame rate    \x04 0.75C clock     \x04 0B  chunking off
+\x04 1R  raw text      \x04F      default   \x04\x04 literal 0x04
+```
+
+Two things to know before using them:
+
+- **A command ends the current utterance.** Textalker buffers a whole
+  line and synthesises nothing until the CR, so a command's position in
+  the text otherwise bears no relation to its position in the audio.
+  Flushing first is what makes "before" and "after" mean anything. The
+  cost is a pause wherever a command appears.
+- **The namespaces are disjoint and the letters differ.** Ctrl-E `F` is
+  flatness and Ctrl-E `C` is compressed; Ctrl-D `F` is frame rate and
+  Ctrl-D `C` is clock. Ctrl-D does not duplicate Textalker's commands
+  because it does not need to -- Ctrl-E sequences survive text
+  preparation untouched.
+
+Settings set this way persist past the call. Bad commands are swallowed
+rather than spoken and counted in `echotalk_command_errors()`; `say`
+warns about them, and about chunking being off however it got that way.
 
 Which Textalker version you get is decided by the images passed;
 `echotalk_version()` reports the parsed banner for display.
@@ -181,6 +210,7 @@ say [options] <loader.bin> <obj.bin> [text] <out.wav>
   --file PATH   read the text from a file (omit the text argument)
   --rate HZ --clock MULT --frame-rate N --compressed
   --pitch N --volume N --word-delay N --repeat-filter N
+  --chunk N --no-chunk --raw
 ```
 
 ## Reference baselines (regression check after any change)
@@ -233,6 +263,12 @@ the dead-air trimming; do not treat them as targets.
   flat memory model silently writes "ROM stubs" over Textalker's image.
 - The loader returns with **ROM** selected, so jumping straight at the
   OBJ entry lands in the shadow. Always enter via the trampoline.
+- **`echotalk_chunk_text()` stops when the caller's array fills and says
+  nothing about the text it never reached.** Callers must loop until the
+  line is consumed. `src/echotalk.c` does; `tools/render_common.h` still
+  calls it once with a 256-entry array and silently drops the tail of
+  any single line needing more chunks than that (20,480 characters at
+  the default chunk size). Worth fixing.
 - **Textalker's own line-buffer bound is never initialised here.**
   `$FD80-$FD82` read as zero because `$D781` is never reached -- nothing
   plays the part of DOS/Applesoft setting up a screen. So its auto-flush

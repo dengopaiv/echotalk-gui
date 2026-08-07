@@ -54,6 +54,9 @@ struct echotalk {
     int compressed;
     int pitch, volume;
     int word_delay, repeat_filter;
+    size_t chunk_size;          /* 0 = do not chunk */
+    int raw;                    /* 1 = skip text preparation */
+    unsigned cmd_errors;        /* malformed Ctrl-D commands seen */
     int settings_dirty;
 
     /* one mark per utterance, for dead-air trimming */
@@ -280,6 +283,7 @@ echotalk *echotalk_create(const char *loader_path, const char *obj_path,
     et->volume = 12;
     et->word_delay = 0;
     et->repeat_filter = 99;  /* high enough never to trigger */
+    et->chunk_size = DEFAULT_CHUNK;
     et->settings_dirty = 1;  /* push defaults before the first utterance */
 
     g_active = et;
@@ -342,6 +346,28 @@ int echotalk_set_repeat_filter(echotalk *et, int t) {
     et->repeat_filter = t; et->settings_dirty = 1; return 0;
 }
 
+/* Chunking is driver-side, so unlike the settings above this needs no
+ * Ctrl-E traffic and does not dirty the settings block. 255 is an
+ * arbitrary ceiling: anything past Textalker's ~80-character line is
+ * already unverified territory, and 0 leaves it entirely. */
+int echotalk_set_chunk_size(echotalk *et, unsigned chars) {
+    if (chars > 255) return -1;
+    et->chunk_size = chars;
+    return 0;
+}
+unsigned echotalk_chunk_size(const echotalk *et) {
+    return (unsigned)et->chunk_size;
+}
+
+int echotalk_set_raw(echotalk *et, int raw) {
+    if (raw != 0 && raw != 1) return -1;
+    et->raw = raw;
+    return 0;
+}
+
+unsigned echotalk_command_errors(const echotalk *et) { return et->cmd_errors; }
+void echotalk_clear_command_errors(echotalk *et) { et->cmd_errors = 0; }
+
 static void apply_settings(echotalk *et) {
     char cmd[16];
     if (!et->settings_dirty) return;
@@ -387,40 +413,66 @@ static void send_utterance(echotalk *et, const char *s, size_t len) {
     send_char(et, '\r');
 }
 
-int echotalk_speak(echotalk *et, const char *text) {
-    if (!et || !text) return -1;
+/* Sends one line, split if it is longer than the current chunk size.
+ *
+ * The chunker is called in batches rather than once. It stops when the
+ * array it was given fills up, and a single call with a fixed array
+ * silently drops everything past that point -- 20,480 characters at the
+ * default chunk size, which is why this went unnoticed, but only 2,048
+ * at a chunk size of 8, which Ctrl-D B now makes reachable. Looping
+ * until the line is consumed removes the ceiling. */
+static void send_line(echotalk *et, const char *line, size_t len) {
+    if (!len) return;
+    if (!et->chunk_size || len <= et->chunk_size) {
+        send_utterance(et, line, len);
+        return;
+    }
+    size_t off = 0;
+    while (off < len) {
+        echotalk_chunk chunks[64];
+        size_t n = echotalk_chunk_text(line + off, len - off, et->chunk_size,
+                                       chunks, sizeof chunks / sizeof chunks[0]);
+        if (!n) break;                  /* only whitespace left */
+        for (size_t c = 0; c < n; c++)
+            send_utterance(et, line + off + chunks[c].offset, chunks[c].length);
+        size_t consumed = chunks[n - 1].offset + chunks[n - 1].length;
+        if (!consumed) break;           /* no progress; refuse to spin */
+        off += consumed;
+    }
+}
 
-    size_t need = echotalk_prep_text((const uint8_t *)text, strlen(text),
-                                     NULL, 0, NULL);
-    char *prepped = malloc(need + 1);
-    if (!prepped) return -1;
-    echotalk_prep_text((const uint8_t *)text, strlen(text), prepped, need + 1, NULL);
+/* One stretch of text spoken at a single set of driver settings.
+ *
+ * This is everything echotalk_speak() used to be. It became a helper
+ * when Ctrl-D commands made one speak() call able to change settings
+ * partway through: trimming and resampling both depend on settings a
+ * later command may change, so each run is finished off on its own. */
+static int speak_run(echotalk *et, const char *text, size_t len) {
+    char *prepped = NULL;
+    const char *body = text;
+    size_t body_len = len;
 
-    apply_settings(et);
+    if (!et->raw) {
+        size_t need = echotalk_prep_text((const uint8_t *)text, len,
+                                         NULL, 0, NULL);
+        prepped = malloc(need + 1);
+        if (!prepped) return -1;
+        echotalk_prep_text((const uint8_t *)text, len, prepped, need + 1, NULL);
+        body = prepped;
+        body_len = need;
+    }
 
     /* Mark where this utterance's audio begins so the think-time dead
      * air before it can be trimmed; CR is what makes Textalker speak. */
     size_t utt_start = et->count;
     et->nmarks = 0;
 
-    const char *line = prepped;
-    size_t remaining = need;
-    while (remaining || line == prepped) {
+    const char *line = body;
+    size_t remaining = body_len;
+    while (remaining) {
         size_t line_len = 0;
         while (line_len < remaining && line[line_len] != '\r') line_len++;
-        if (line_len) {
-            echotalk_chunk chunks[256];
-            size_t n = (line_len <= DEFAULT_CHUNK)
-                     ? 0
-                     : echotalk_chunk_text(line, line_len, DEFAULT_CHUNK,
-                                           chunks, 256);
-            if (!n) {
-                send_utterance(et, line, line_len);
-            } else {
-                for (size_t c = 0; c < n; c++)
-                    send_utterance(et, line + chunks[c].offset, chunks[c].length);
-            }
-        }
+        send_line(et, line, line_len);
         if (line_len >= remaining) break;
         line += line_len + 1;
         remaining -= line_len + 1;
@@ -499,6 +551,127 @@ int echotalk_speak(echotalk *et, const char *text) {
         }
     }
     return et->aborted ? -1 : 0;
+}
+
+/* --- Ctrl-D driver commands ----------------------------------------
+ *
+ * Shape deliberately copied from Textalker's own Ctrl-E commands: an
+ * optional number, then a letter. See echotalk.h for the command list
+ * and for why a command ends the current utterance. */
+
+#define CTRL_D 0x04
+
+/* Digits with at most one decimal point: "2", "0.75", ".5". Always a
+ * '.' regardless of locale -- this is a wire format, not a display
+ * format. Returns 1 if anything was consumed. */
+static int parse_number(const char *s, size_t len, size_t *i, double *out) {
+    size_t start = *i;
+    int seen_dot = 0;
+    double v = 0.0, scale = 0.1;
+    while (*i < len) {
+        char c = s[*i];
+        if (c >= '0' && c <= '9') {
+            if (seen_dot) { v += (c - '0') * scale; scale *= 0.1; }
+            else            v = v * 10.0 + (c - '0');
+        } else if (c == '.' && !seen_dot) {
+            seen_dot = 1;
+        } else break;
+        (*i)++;
+    }
+    if (*i == start) return 0;
+    *out = v;
+    return 1;
+}
+
+/* Whole numbers only. "1.5F" is a mistake rather than something to
+ * round, so it is rejected and counted like any other bad command. */
+static int drv_int(double v, int *out) {
+    if (v < 0.0 || v > 1000000.0) return -1;
+    long n = (long)v;
+    if ((double)n != v) return -1;
+    *out = (int)n;
+    return 0;
+}
+
+/* Returns 0 if applied, -1 if the letter is unknown or the value is out
+ * of range. A letter with no number restores that setting's default. */
+static int apply_drv_cmd(echotalk *et, char letter, int has_value, double value) {
+    int n;
+    switch (letter) {
+    case 'F': case 'f':                       /* TMS5220 frame rate    */
+        if (!has_value) return echotalk_set_frame_rate(et, 0);
+        if (drv_int(value, &n)) return -1;
+        return echotalk_set_frame_rate(et, n);
+    case 'C': case 'c':                       /* chip clock multiplier */
+        return echotalk_set_clock_multiplier(et, has_value ? value : 1.0);
+    case 'B': case 'b':                       /* line buffer / chunking */
+        if (!has_value) return echotalk_set_chunk_size(et, DEFAULT_CHUNK);
+        if (drv_int(value, &n)) return -1;
+        return echotalk_set_chunk_size(et, (unsigned)n);
+    case 'R': case 'r':                       /* raw text passthrough  */
+        if (!has_value) return echotalk_set_raw(et, 0);
+        if (drv_int(value, &n)) return -1;
+        return echotalk_set_raw(et, n);
+    default:
+        return -1;
+    }
+}
+
+int echotalk_speak(echotalk *et, const char *text) {
+    if (!et || !text) return -1;
+    size_t len = strlen(text);
+
+    apply_settings(et);
+
+    /* A segment can only ever be shorter than the input it came from. */
+    char *seg = malloc(len + 1);
+    if (!seg) return -1;
+    size_t seglen = 0, i = 0;
+    int rc = 0;
+
+    while (i < len) {
+        if ((unsigned char)text[i] != CTRL_D) { seg[seglen++] = text[i++]; continue; }
+
+        /* Doubled Ctrl-D is an escaped literal, not a command. This is
+         * what keeps raw mode reachable in both directions: Ctrl-D has
+         * to be honoured even in raw mode, or 1R would be a one-way
+         * door, so text that means a literal 0x04 needs a way to say
+         * so. */
+        if (i + 1 < len && (unsigned char)text[i + 1] == CTRL_D) {
+            seg[seglen++] = (char)CTRL_D;
+            i += 2;
+            continue;
+        }
+
+        /* Flush what is buffered before the setting changes under it. */
+        if (seglen && speak_run(et, seg, seglen) != 0) rc = -1;
+        seglen = 0;
+
+        /* Whitespace may follow the introducer, because that is where a
+         * person writing "Ctrl-D 2F" naturally puts it. The number and
+         * letter are one token though, exactly as in Ctrl-E's "12P" --
+         * allowing a gap there would make "\x04 2 Fox" ambiguous
+         * between a command and text. */
+        size_t j = i + 1;
+        while (j < len && (text[j] == ' ' || text[j] == '\t')) j++;
+        double value = 0.0;
+        int has_value = parse_number(text, len, &j, &value);
+        char c = (j < len) ? text[j] : 0;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+            if (apply_drv_cmd(et, c, has_value, value) != 0) et->cmd_errors++;
+            i = j + 1;
+        } else {
+            /* Swallow the introducer and any number that followed it.
+             * Leaving the digits behind would have the host speak
+             * fragments of its own control codes. */
+            et->cmd_errors++;
+            i = j;
+        }
+    }
+    if (seglen && speak_run(et, seg, seglen) != 0) rc = -1;
+    free(seg);
+
+    return (rc || et->aborted) ? -1 : 0;
 }
 
 size_t echotalk_available(const echotalk *et) {

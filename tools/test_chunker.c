@@ -49,5 +49,25 @@ int main(void) {
               "Ingredients: flour; sugar; eggs; butter. Mix well and bake at 350 degrees for twenty five minutes.",
               35);
 
+    /* echotalk_chunk_text stops when the caller's array fills and says
+     * nothing about the text it did not reach -- so a single call can
+     * silently drop the tail of a long line. The library must therefore
+     * call it in a loop, not once; see send_line() in echotalk.c. This
+     * pins the behaviour that makes the loop necessary. */
+    {
+        const char *text = "one two three four five six seven eight nine ten";
+        echotalk_chunk chunks[3];
+        size_t n = echotalk_chunk_text(text, strlen(text), 10, chunks, 3);
+        size_t reached = n ? chunks[n - 1].offset + chunks[n - 1].length : 0;
+        printf("=== caller's array fills before the text runs out ===\n");
+        printf("input: \"%s\"\n", text);
+        printf("  %zu chunks written, %zu of %zu bytes reached\n",
+               n, reached, strlen(text));
+        printf("  %s\n\n",
+               reached < strlen(text)
+                 ? "tail not reported -- callers MUST loop"
+                 : "!!! expected the array to fill first !!!");
+    }
+
     return 0;
 }
