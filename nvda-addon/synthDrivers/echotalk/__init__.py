@@ -72,6 +72,16 @@ DEFAULT_SAMPLERATE = "8000"
 # which it does better than a driver could.
 _UNSAFE = re.compile(r"[\x04\x05\x16]")
 
+# --- optional diagnostic ---
+#
+# Create an empty file called "logsequences.txt" next to this driver and
+# restart NVDA, and every speech sequence NVDA hands over is written to
+# NVDA's log along with how many were already waiting. That is the only
+# way to find out from outside how NVDA splits a document in Say All and
+# where it places its index marks, rather than guessing. Off unless the
+# file exists; delete it to stop.
+_LOG_SEQUENCES = os.path.isfile(os.path.join(_DIR, "logsequences.txt"))
+
 
 def _toCard(pct, maxVal):
 	"""NVDA's 0-100 slider -> a library value."""
@@ -548,6 +558,8 @@ class SynthDriver(SynthDriver):
 	# --- speech ---------------------------------------------------------
 
 	def speak(self, speechSequence):
+		if _LOG_SEQUENCES:
+			self._logSequence(speechSequence)
 		parts = []
 		for item in speechSequence:
 			if isinstance(item, str):
@@ -570,6 +582,24 @@ class SynthDriver(SynthDriver):
 				# here would quietly un-flatten a monotone voice.
 				parts.append("\x05%d%s" % (card, "F" if self._monotone else "P"))
 		self._queue.put("".join(parts))
+
+	def _logSequence(self, speechSequence):
+		"""Writes what NVDA just handed us to the log. Diagnostic only."""
+		try:
+			desc = []
+			for item in speechSequence:
+				if isinstance(item, str):
+					desc.append("text(%d) %r" % (len(item), item[:60]))
+				elif isinstance(item, IndexCommand):
+					desc.append("Index(%d)" % item.index)
+				elif isinstance(item, PitchCommand):
+					desc.append("Pitch(%+d)" % item.offset)
+				else:
+					desc.append(type(item).__name__)
+			log.info("EchoTalk seq [queued=%d gen=%d]: %s"
+				% (self._queue.qsize(), self._gen, " | ".join(desc)))
+		except Exception:
+			log.debugWarning("EchoTalk sequence logging failed", exc_info=True)
 
 	def cancel(self):
 		"""Abandons whatever is in flight. Must return promptly.

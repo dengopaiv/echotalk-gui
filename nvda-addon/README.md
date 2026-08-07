@@ -123,3 +123,21 @@ explicit exception permitting non-GPL synthesizer drivers.
 
 The Textalker images are covered by none of that and are not distributed
 here.
+
+## Diagnosing what NVDA sends
+
+Create an empty file called `logsequences.txt` next to `__init__.py` in
+the installed add-on and restart NVDA. Every speech sequence NVDA hands
+the driver is then written to NVDA's log, like this:
+
+```
+EchoTalk seq [queued=0 gen=0]: text(12) 'First part. ' | Index(11) | text(13) 'Second part. ' | Index(22)
+```
+
+`queued` is how many sequences were already waiting to be spoken, which
+says whether NVDA runs ahead or feeds one at a time. `Index(n)` marks
+show where NVDA has placed its progress callbacks. Between them that is
+enough to work out how NVDA splits a document rather than guessing.
+
+Delete the file and restart to turn it off. It logs at info level, so it
+will fill the log quickly — turn it on for one test, not for daily use.

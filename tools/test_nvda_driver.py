@@ -180,6 +180,9 @@ class WavePlayer:
 
 
 class _Log:
+	def info(self, *a, **k):
+		print("    [log]", a[0] if a else "")
+
 	def error(self, *a, **k):
 		print("    [driver log error]", a[0] if a else "")
 
@@ -268,6 +271,10 @@ def main():
 			shutil.copy(os.path.join(romdir, name), drvdir)
 			pairs += name.endswith(".obj.bin")
 	print(f"staged {pairs} image pair(s) in {drvdir}")
+
+	# Turn on the sequence logging so the harness proves the diagnostic
+	# actually reports what it claims to.
+	open(os.path.join(drvdir, "logsequences.txt"), "w").close()
 
 	sys.path.insert(0, stage)
 	import synthDrivers.echotalk as drv
