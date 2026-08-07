@@ -1,3 +1,10 @@
+> ## PARTLY SUPERSEDED
+>
+> The streaming design here is current. **The index-event behaviour is
+> not:** marks no longer end the utterance they sit in. See
+> `say_all_index_breaks.md`, which explains why that had to change and
+> what replaced it.
+
 # Streaming and index events
 
 Session 11, the last two items on HANDOFF's list. The design note from

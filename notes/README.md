@@ -1,105 +1,103 @@
 # notes/ index
 
-Investigation writeups, roughly chronological. `HANDOFF.md` in the
-project root summarises the conclusions; these keep the reasoning,
-including approaches that turned out to be wrong and why.
+Investigation writeups. `HANDOFF.md` in the project root summarises the
+conclusions; these keep the reasoning, including approaches that turned
+out to be wrong and why.
 
-Sample counts quoted in the older files predate the session-10 pacing
-fix and dead-air trimming. **Treat HANDOFF.md's baseline table as
-authoritative**, not the numbers here.
+> **Sample counts in the older files are obsolete.** Anything written
+> before session 10 predates the pacing fix and dead-air trimming;
+> anything before session 11 predates the step-budget fix.
+> **HANDOFF.md's baseline table is the only authority.**
 
-## Resolved bugs (the useful ones to read)
+## Current design -- read these to understand what exists
 
-- `pacing_fast_start_hack.md` — **the pacing bug, solved.** A `#define`
-  lost in the port. Start here; it also explains why the audible symptom
-  looked compression-specific when the defect was not.
-- `onset_glitch_fixed_by_real_loader.md` — **the onset glitch, solved**
-  by booting through Textalker's real loader, which forced the
-  language-card model everything else now depends on.
-- `chunker_wired_in_buffer_bounds_uninitialised.md` — long text split
-  mid-word; the chunker existed but was never called, and Textalker's
-  own buffer bound is never initialised here.
-- `input_handling_repeat_filter_and_encoding.md` — repeat filter, LF
-  handling, and encoding conversion.
-- `single_letter_word_bug_fixed.md` — an infinite BRK loop from a
-  missing ROM stub; also where the wild-jump trap came from.
-- `single_char_return_bug_fixed.md` — a lone character also spoke
-  "return". Fixed by moving the mode restore before the CR rather than
-  after it. Records the ordering property that makes that work:
-  Textalker buffers a whole line and processes embedded Ctrl-E commands
-  in sequence when the CR arrives.
-- `tms5220_port_dangling_statements.md` — five instances of stripped log
-  calls leaving dangling control flow. Read before touching the port.
-
-## Design and architecture
-
-- `ctrl_d_driver_commands.md` — driver settings embedded in the text
-  stream, in the shape of Textalker's own Ctrl-E commands. Explains why
-  a command has to end the current utterance, and records a latent
-  chunker-truncation bug it uncovered.
-
-- `library_plan_rate_and_pitch.md` — the rate, pitch and resampling
-  design behind the library's controls, and a worked example of a
-  confident negative result that was wrong: frame-rate control was
-  written off on a measurement that had silently not taken effect.
-  **Read the "MEASURED: it works" section before the later one that says
-  it does not** — the superseded conclusion sits after its own
-  correction, which is a trap top-to-bottom. Superseded again by
-  `continuous_speed_accumulator.md`, which built the accumulator this
-  note proposes.
-- `multi_version_support_design.md` — how one binary handles both
+- `streaming_and_indexing.md` -- pull-driven synthesis and index events.
+  Why the session-6 worker-thread design was dropped (synthesis runs at
+  90-155x real time) and how the pieces fit.
+- `say_all_index_breaks.md` -- why index marks no longer end an utterance,
+  and what NVDA actually sends in Say All. **Supersedes the index-event
+  behaviour described in `streaming_and_indexing.md`.**
+- `continuous_speed_accumulator.md` -- continuous, pitch-preserving speech
+  rate, by unlocking the parameter state machine from the audio path.
+  Why 1.0 is byte-exact by construction, and pitch measured holding at
+  129 Hz across a 6x range.
+- `settings_mirroring.md` -- watching Ctrl-E commands go past so a voice
+  can be read back and carried to a fresh instance. Records that `nP`
+  and `nF` are one setting with two spellings.
+- `ctrl_d_driver_commands.md` -- driver settings embedded in the text
+  stream, and why a command ends the current utterance.
+- `dll_packaging.md` -- export surface, calling convention, runtime
+  dependencies, ABI version, why there are two DLL test programs, and
+  the Windows/Linux bit-identical result.
+- `multi_version_support_design.md` -- how one binary handles both
   Textalker versions, detected structurally rather than by hash.
-- `buffer_chunking_and_indexing.md` — chunking rationale, plus the
-  original look-ahead synthesis / index-event plan. **Superseded** by
-  `streaming_and_indexing.md`, which implemented both differently:
-  measurement showed the worker thread it proposes is unnecessary.
-- `tms5220_port_and_audio_pipeline.md` — how the TMS5220 port was made.
-- `mingw_build_system.md` — build targets, runtimes, and the
-  wrong-architecture trap the Makefile now guards against.
-- `dll_packaging.md` — the export surface, calling convention, runtime
-  dependencies and ABI version, plus why there are two DLL test
-  programs rather than one.
-- `streaming_and_indexing.md` — pull-driven synthesis and exact index
-  events. Why the session-6 worker-thread design was dropped (synthesis
-  runs at ~136x real time), and why index marks being Ctrl-D commands
-  makes their offsets free.
-- `continuous_speed_accumulator.md` — continuous, pitch-preserving
-  speech rate, by unlocking the parameter state machine from the audio
-  path. Explains why 1.0 is byte-exact by construction, and measures
-  that pitch really does stay put.
-- `say_all_index_breaks.md` — why NVDA's Say All read a wrapped sentence
-  one line at a time, and how a log of what NVDA really sends killed two
-  plausible theories before either became code.
-- `step_budget_truncation.md` — **the real cause** of speech going wrong
-  at high word delay or slow speed: the 6502 step budget was four times
-  too small and truncated in silence. Solved by a negative result Jayson
-  volunteered. Also why any budget that can truncate must report it.
-- `nvda_cancel_race.md` — three cancellation defects found by testing the
-  add-on in real NVDA, and why a flag was the wrong primitive for
-  cancellation in the first place. Also a worked example of checking that
-  a regression test fails on the broken code.
-- `settings_mirroring.md` — watching Ctrl-E commands go past and
-  updating the library's own variables, so a voice can be read back and
-  carried to a fresh instance. Records that `nP` and `nF` are one
-  setting with two spellings, that command letters are case-insensitive,
-  and a wrong model I was talked out of before it cost anything.
+- `mingw_build_system.md` -- build targets, runtimes, and the
+  wrong-architecture trap the Makefile guards against.
+- `tms5220_port_and_audio_pipeline.md` -- how the TMS5220 port was made.
 
-## Superseded, kept for the reasoning only
+## Bugs worth reading for the lesson
 
-- `onset_glitch_investigation_reverted.md` — the session-9 dead end.
-  Its lattice-filter analysis is sound but was not the cause; carries a
-  pointer to the real fix.
+- `step_budget_truncation.md` -- the 6502 step budget was four times too
+  small and truncated speech **in silence**. Solved by a negative result
+  Jayson volunteered. The reason any limit that can truncate must report
+  it.
+- `nvda_cancel_race.md` -- three cancellation defects, and why a flag was
+  the wrong primitive for cancellation.
+- `pacing_fast_start_hack.md` -- **the pacing bug, solved.** A `#define`
+  lost in the port from MAME. Explains why the audible symptom looked
+  compression-specific when the defect was not.
+- `onset_glitch_fixed_by_real_loader.md` -- **the onset glitch, solved**
+  by booting through Textalker's real loader, which forced the
+  language-card model everything now depends on.
+- `single_char_return_bug_fixed.md` -- a lone character also spoke
+  "return". Records that Textalker buffers a whole line and processes
+  embedded Ctrl-E commands in sequence when the CR arrives, which is
+  load-bearing for several later decisions.
+- `tms5220_port_dangling_statements.md` -- five stripped log calls leaving
+  dangling control flow. **Read before touching the port.**
+- `chunker_wired_in_buffer_bounds_uninitialised.md` -- the chunker existed
+  but was never called, and Textalker's own buffer bound is never
+  initialised here.
+- `input_handling_repeat_filter_and_encoding.md` -- repeat filter, LF
+  handling, encoding conversion.
+- `single_letter_word_bug_fixed.md` -- an infinite BRK loop from a missing
+  ROM stub; also where the wild-jump trap came from.
+
+## Superseded -- kept for the reasoning only, DO NOT follow
+
+Everything below describes a state of the project that no longer exists,
+or a conclusion later shown to be wrong. Read for the reasoning, never
+for instructions.
+
+- `buffer_chunking_and_indexing.md` -- the original look-ahead synthesis
+  and index-event plan. **Both were implemented differently**, and the
+  worker thread it proposes is unnecessary. Superseded by
+  `streaming_and_indexing.md` and `say_all_index_breaks.md`. Its chunking
+  rationale is still accurate.
+- `library_plan_rate_and_pitch.md` -- the rate and pitch design. **Its
+  later section claiming frame-rate control does not work is WRONG, and
+  sits after its own correction**, which makes it a trap read top to
+  bottom; the "MEASURED: it works" section is the accurate one. The
+  accumulator it proposes was built -- see
+  `continuous_speed_accumulator.md`.
+- `onset_glitch_investigation_reverted.md` -- the session-9 dead end. Its
+  lattice-filter analysis is sound but was not the cause.
 - `pacing_investigation_restarts.md`,
   `pacing_mame_bytestream_comparison.md`,
-  `pacing_isolated_to_restart_idle.md`,
-  `pacing_device_sample_counter.md`,
-  `pacing_arrival_phase_prediction.md` — the pacing hunt in sequence,
+  `pacing_isolated_to_restart_idle.md`, `pacing_device_sample_counter.md`,
+  `pacing_arrival_phase_prediction.md` -- the pacing hunt in sequence,
   including a falsified prediction and a correction that was itself
   wrong. Useful mainly as a record of which measurements mislead.
-- `true_timing_implemented_not_the_cause.md` — true timing implemented
-  faithfully; explains why it is opt-in.
-- `fake6502_bcd_decimal_mode.md` — BCD enabled; measured to change
+- `true_timing_implemented_not_the_cause.md` -- **its reservation no
+  longer applies.** True timing works, produces byte-identical output and
+  clobbers nothing; it stays opt-in only because there is no reason to
+  switch.
+- `fake6502_bcd_decimal_mode.md` -- BCD enabled; measured to change
   nothing.
-- `v13_*.md`, `session2_findings.md`, `disasm_fd53.txt`,
-  `dispatch_table_d817.txt` — early reverse-engineering. Largely
-  absorbed into HANDOFF.md.
+- `session2_findings.md` -- early reverse engineering. Still accurate that
+  `$D009` blocks on a keypress, but the single-character problem it was
+  investigating was solved a completely different way.
+- `v13_compatibility.md`, `v13_working.md`,
+  `v13_vs_v3_cricket_investigation.md`, `disasm_fd53.txt`,
+  `dispatch_table_d817.txt` -- early v1.3 work, absorbed into
+  `multi_version_support_design.md` and HANDOFF.

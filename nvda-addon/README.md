@@ -106,9 +106,15 @@ wrong one:
   obey them as commands — a document containing one would silently change
   the voice. They are replaced with a space rather than deleted, so the
   rest of the line still gets spoken.
-- **Index reporting is exact.** The library records the sample position of
-  every mark as it generates the audio, rather than estimating, so
-  progress reporting is ground truth.
+- **Say All reads a wrapped sentence as one sentence.** NVDA sends a
+  whole Say All as a single sequence with an index mark between every
+  line. Those marks used to end the utterance, which read a sentence
+  split over several lines as several sentences. They no longer do.
+- **Index positions are exact at an utterance boundary**, which is where
+  almost all of NVDA's are, and interpolated by character offset inside
+  one. The latter has to be approximate: Textalker emits nothing until
+  the terminating CR, so there is no way to observe which character is
+  being spoken.
 - **One voice at a time.** The 6502 core keeps its registers in globals,
   so only one instance can exist. Switching voices tears the machine down
   and boots the other images, which costs under 10 ms and re-applies every

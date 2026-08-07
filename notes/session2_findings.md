@@ -1,3 +1,11 @@
+> ## HISTORICAL — the problem this was chasing was solved elsewhere
+>
+> The `$D009` findings are still accurate: that entry point blocks on a
+> keypress. But it was being investigated as a route to speaking a single
+> character without a line terminator, and that turned out to need
+> nothing of the sort — see `single_char_return_bug_fixed.md`. Kept for
+> the disassembly and the boot-harness fixes, which are still true.
+
 # Session 2: boot harness findings
 
 ## Fixed to get the real loader running cleanly under simulation

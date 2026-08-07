@@ -1,3 +1,14 @@
+> ## SUPERSEDED — do not follow the plan below
+>
+> The look-ahead synthesis and indexing architecture proposed here was
+> **implemented differently**. There is no worker thread: synthesis runs
+> at 90-155x real time, so `echotalk_read()` does it inline. Index marks
+> do not end an utterance. See `streaming_and_indexing.md` and then
+> `say_all_index_breaks.md` for what actually exists.
+>
+> The chunking rationale in the first half is still accurate and still
+> describes the shipping behaviour.
+
 # Buffering, chunking, look-ahead synthesis, and indexing (session 6)
 
 ## Textalker's buffer size (confirmed via disassembly)

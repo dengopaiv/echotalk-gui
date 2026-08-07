@@ -1,3 +1,18 @@
+> ## PARTLY WRONG — read this before the rest
+>
+> Two warnings, because this file is a trap read top to bottom:
+>
+> 1. A later section states that frame-rate control **does not** speed
+>    speech up. **That conclusion is wrong** and sits AFTER the correction
+>    that overturns it. The "MEASURED: it works" section is the accurate
+>    one — frame rate gives 1.00x, 1.31x, 1.89x and 3.40x.
+> 2. The continuous accumulator proposed at the end **was built**, in
+>    session 11. See `continuous_speed_accumulator.md`. Its warning that
+>    the accumulator would hit "the same wall" was half right: the ratio
+>    is sub-linear, but the wall bends rather than stops.
+>
+> The resampling and pitch-independence design is otherwise accurate.
+
 # Library plan: output rate, clock multiplier, and speech rate
 
 Planning notes for the three audio features requested before the library

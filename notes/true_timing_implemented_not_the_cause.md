@@ -1,3 +1,11 @@
+> ## THE RESERVATION HERE NO LONGER APPLIES
+>
+> This file explains why true timing was left opt-in. The write-latch
+> losses it describes were caused by reset wiping the `/READY` callback,
+> which has since been fixed. True timing now produces byte-identical
+> output and clobbers nothing. It remains opt-in only because there is no
+> reason to switch the default.
+
 # True timing implemented; it is not the pacing bug (session 10)
 
 The last structural difference between our chip model and MAME's was

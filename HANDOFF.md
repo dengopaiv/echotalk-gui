@@ -1,108 +1,99 @@
 # EchoTalk project handoff
 
-Last substantially rewritten during session 11, which finished the
-library: the DLL, streaming, index events, and settings mirroring. Read
-this first; `notes/` holds the detailed writeups, referenced from here
-where relevant.
+Rewritten at the end of session 11, when the project reached the point
+where everything the NVDA backend needs exists and works. Read this
+first; `notes/` holds the detailed writeups and `notes/README.md` indexes
+them.
 
 ## Read this first: who you're working with
 
-The person you're working with is **blind and uses a screen reader**.
-MAME's UI (including its interactive debugger) is not accessible to
-them, so **do not rely on MAME's GUI or interactive debugger for
-anything**. Any MAME-based verification must go through headless /
-command-line output that can be read as plain text. This constraint
-shaped many decisions in this project and should keep shaping them.
+You are working with **Jayson Smith** (he/him). He is **blind and uses a
+screen reader**. MAME's UI, including its interactive debugger, is not
+accessible to him, so **never rely on a GUI or an interactive debugger
+for anything** — any verification he has to perform must come out as
+plain text, or as audio he can listen to.
 
-They are also extremely sharp technically and an excellent
-collaborator. They catch real bugs by ear reliably, and they test
-claims rather than taking them -- twice in session 10 that caught a
-genuine error of mine (see "Working practices" at the end). When they
-say something sounds wrong, believe them and investigate.
+He is an excellent collaborator and technically sharp. Two things about
+how he works are worth knowing because they have repeatedly changed the
+outcome:
+
+- **He catches real bugs by ear.** The single-character "return" bug and
+  the speech-pacing defect were both found that way, the second after
+  five sessions of automated measurement said everything was fine.
+- **He supplies discriminating evidence, often unprompted.** The two
+  hardest bugs in session 11 were solved by things he volunteered: "I
+  can't reproduce it by setting the clock rate to 0%" killed a wrong
+  theory instantly and pointed at the step budget, and an NVDA log
+  settled the Say All question after two plausible theories had failed.
+
+When he says something sounds wrong, believe him and investigate. When a
+theory can be tested cheaply from his side, ask — it beats reasoning.
 
 ## Project goal
 
-A C library (Windows DLL / Linux .so) that emulates the Apple II Echo II
-speech synthesizer card (TMS5220) running Street Electronics' Textalker,
-for use as an NVDA speech backend. It ships as a real 6502 emulation of
-Textalker driving a ported TMS5220, with no dependency on Apple ROM or
-DOS code.
+A C library (Windows DLL, Linux `.so`) that emulates the Apple II Echo II
+speech card (TMS5220) running Street Electronics' Textalker, for use as
+an NVDA speech backend. It runs the **real Textalker binary** under a
+6502 emulator driving a port of MAME's TMS5220. Nothing about the speech
+is reimplemented or approximated, and no Apple ROM or DOS code is used.
 
-## Current state: everything the NVDA backend needs is in place
+## Current state: complete and working
 
-Speech is validated against real hardware and against MAME, and **there
-are no open bugs**. The library is `src/echotalk.[ch]`, driven by
-`tools/say.c`. It builds as a Windows DLL and a Linux `.so`, it streams,
-it reports exact index events, and it mirrors Ctrl-E commands into its
-own settings so a voice can be read back and carried elsewhere.
+There are **no known open bugs**. In place and tested:
 
-Session 11, in order:
+- Emulation validated against a real-hardware capture and against MAME.
+- Both Textalker **3.1.3 and 1.3** run from one binary.
+- The library, `src/echotalk.[ch]`, with the full settings surface.
+- **Windows DLLs** (32- and 64-bit) and a **Linux `.so`**, ABI 6,
+  44 exports.
+- **Streaming**: `speak()` queues and returns; `read()` synthesises.
+- **Index events** for NVDA progress reporting.
+- **An NVDA add-on**, `nvda-addon/`, working in real NVDA.
+- Output is **bit-identical between Windows and Linux**.
 
-- The single-character "return" bug, found by ear after the library was
-  written. `notes/single_char_return_bug_fixed.md`
-- Ctrl-D driver commands embedded in the text stream.
-  `notes/ctrl_d_driver_commands.md`
-- DLL packaging, 32- and 64-bit. `notes/dll_packaging.md`
-- Pull-driven streaming and index events.
-  `notes/streaming_and_indexing.md`
-- Ctrl-E settings mirroring and read-back.
-  `notes/settings_mirroring.md`
-
-Fixed in session 10, in order:
-
-- **Onset glitch** (open since session 9). Cause: the harness skipped
-  Textalker's real loader. Booting through it fixes the glitch and
-  forced the language-card model below. `notes/onset_glitch_fixed_by_real_loader.md`
-- **Speech pacing / "sluggish compressed speech"** (open since session
-  7). Cause: `#define FAST_START_HACK 1` was lost in the port from MAME
-  while both `#ifdef FAST_START_HACK` sites came across, so the blocks
-  compiled to nothing and every restart cost an extra 25 ms frame.
-  `notes/pacing_fast_start_hack.md`
-- Long text split mid-word: the chunker existed but was never wired in.
-  `notes/chunker_wired_in_buffer_bounds_uninitialised.md`
-- Textalker's repeat filter mangling real words, LF being spoken as
-  "linefeed", and no handling of non-ASCII input.
-  `notes/input_handling_repeat_filter_and_encoding.md`
-- Dead air before every utterance, proportional to its length.
-- Four defects from the mechanical C++-to-C port.
-  `notes/tms5220_port_dangling_statements.md`
+What has *not* been tested is in "Untested ground" below. Read it before
+claiming the project is finished.
 
 ## Repository layout
 
 ```
 echotalk/
   third_party/
-    fake6502/fake6502.c       public-domain 6502 core (Mike Chambers)
-    tms5220_core/             our standalone C port of MAME's TMS5220.
-                              This is what ships. BSD-3-Clause.
-    tms5220/                  UNMODIFIED MAME source, reference only,
-                              not compiled. Diff against this when
-                              anything looks wrong -- it has paid off
-                              four times.
-  roms/                       Textalker binaries, user-supplied,
-                              proprietary. See THIRD_PARTY_LICENSES.md.
+    fake6502/fake6502.c    public-domain 6502 core (Mike Chambers)
+    tms5220_core/          our standalone C port of MAME's TMS5220.
+                           This is what ships. BSD-3-Clause.
+    tms5220/               UNMODIFIED MAME source, reference only, not
+                           compiled. Diff against this when anything
+                           looks wrong — it has paid off four times.
+  roms/                    Textalker images, user-supplied, proprietary.
   src/
-    echotalk.c/.h             THE LIBRARY. Public API; the harness's
-                              pipeline turned into something callable.
-    chunker.c/.h              splits text to fit Textalker's buffer
-    text_prep.c/.h            modern text -> 7-bit ASCII, LF stripping
-    resample.c/.h             linear resampling, no anti-aliasing
+    echotalk.c/.h          THE LIBRARY. Public API, documented in the
+                           header, which is the API reference.
+    chunker.c/.h           splits text to fit Textalker's buffer
+    text_prep.c/.h         modern text -> 7-bit ASCII, LF stripping
+    resample.c/.h          linear resampling, phase carried across calls
   tools/
-    say.c                     drives the library the way a host would;
-                              the end-to-end test that the API works
-    render_text_loader.c      THE canonical harness. Handles BOTH
-                              Textalker versions from one binary.
-    render_common.h           shared CLI, trimming, WAV output, chunking
-    render_v13.c              v1.3-only harness, now redundant with the
-                              above; kept as an independent cross-check
-    render_text_real_chip.c   superseded direct-init harness, kept for
-                              A/B comparison (it shows the onset glitch)
-    wav_stats.c               onset/duration/clipping measurement
-    test_text_prep.c,
-    test_chunker.c            pure-logic unit tests, no ROM needed
+    say.c                  the CLI; drives the library as a host would
+    render_text_loader.c   THE canonical harness, both Textalker
+                           versions, and what the baselines are measured
+                           with
+    render_common.h        shared CLI, trimming, WAV output, chunking
+    test_dll.py            loads the DLL via ctypes, as NVDA does
+    test_dll_load.c        the same via GetProcAddress, so the 32-bit
+                           DLL gets tested too
+    test_nvda_driver.py    runs the NVDA driver with NVDA stubbed out
+    listen_check.py        writes a self-narrating WAV to check by ear
+    wav_stats.c            onset/duration/clipping measurement
+    test_text_prep.c, test_chunker.c   pure-logic tests, no ROM needed
+    render_v13.c, render_text_real_chip.c   kept as independent
+                           cross-checks; the latter shows the onset
+                           glitch on purpose
     (probe_*, render_from_bytes, render_trace, render_hi_real_chip,
-     boot_and_probe, render_wav are historical probes; safe to ignore)
-  notes/                      investigation writeups, chronological
+     boot_and_probe, render_wav, resample_wav are historical probes.
+     Safe to ignore, and safe to delete.)
+  nvda-addon/              the NVDA add-on; see its own README
+  notes/                   investigation writeups; notes/README.md
+                           indexes them and flags the superseded ones
 ```
 
 ## Building
@@ -111,180 +102,220 @@ Toolchain is MSYS2. **The `gcc` on PATH is an old Cygwin install and
 must not be used.**
 
 ```
-make native     # host build
-make win64      # 64-bit, UCRT runtime
-make win32      # 32-bit, MSVCRT runtime (for older 32-bit NVDA)
-make test       # pure-logic unit tests, needs no ROMs
+make native          # host build
+make win64 / win32   # 64-bit UCRT, 32-bit MSVCRT
+make dll             # echotalk.dll, both architectures, + import libs
+make so              # Linux/macOS libechotalk.so
+make test            # pure-logic unit tests, no ROMs needed
+make test-dll        # load the 64-bit DLL from Python, as NVDA does
+make test-dll-load   # the same from C, BOTH architectures
+make listen          # writes a self-narrating WAV to check by ear
 ```
 
-Either Windows target builds from any MSYS2 shell -- the Makefile finds
-the right compiler by absolute path and then verifies it with
-`gcc -dumpmachine`, refusing to build rather than producing a
-mislabeled binary. Both were verified on real Windows.
+Either Windows target builds from any MSYS2 shell: the Makefile finds the
+right compiler by absolute path and verifies it with `gcc -dumpmachine`,
+refusing to build rather than producing a mislabeled binary.
 `notes/mingw_build_system.md`
+
+**Trap when building from Git Bash rather than an MSYS2 shell.** Git for
+Windows sets `MSYSTEM=MINGW64`, so the Makefile concludes it is already
+in the right subsystem and reaches for the bare `gcc` — the Cygwin one.
+The architecture guard catches it, so nothing mislabeled is produced, but
+you must name the compilers:
+
+```
+make win64 win32 CC_WIN64=/s/msys/ucrt64/bin/gcc.exe CC_WIN32=/s/msys/mingw32/bin/gcc.exe
+```
 
 ## Running
 
 ```
-render_text_loader [options] <loader.bin> <obj.bin> <input.bin> <out.wav>
-```
-
-Input is raw bytes -- Echo/Textalker control codes and text, high bit
-NOT set; the tool sets it. Options:
-
-- `-v` boot diagnostics and per-character progress
-- `--no-trim` keep dead air (needed to reproduce raw sample counts)
-- `--keep-chunk-gaps` keep dead air between utterances only
-- `--no-repeat-fix` leave Textalker's repeat filter at its default
-- `--raw` skip text preparation
-- `--chunk N` / `--no-chunk` line-splitting control (default 80)
-
-Diagnostic environment variables: `ECHOTALK_CHIP_TRACE`,
-`ECHOTALK_RESETL4`, `ECHOTALK_BYTE_DUMP`, `ECHOTALK_ARRIVAL`,
-`ECHOTALK_POLL_TRACE`, `ECHOTALK_BANK_TRACE`, `ECHOTALK_PC_WATCH`,
-`ECHOTALK_PHASE`, `ECHOTALK_CPU_HZ`, `ECHOTALK_TRUE_TIMING`,
-`ECHOTALK_INSTANT`.
-
-## The library
-
-`src/echotalk.h` is the API and documents itself; the short version:
-
-```c
-echotalk *et = echotalk_create(loader_path, obj_path, err, sizeof err);
-echotalk_set_compressed(et, 1);      /* Textalker's own two rates    */
-echotalk_set_frame_rate(et, 2);      /* 0-3, speed only, no pitch    */
-echotalk_set_clock_multiplier(et, 1.5); /* speed AND pitch           */
-echotalk_set_sample_rate(et, 22050); /* output format only           */
-echotalk_speak(et, "Hello.");
-while ((n = echotalk_read(et, buf, 1024)) > 0) { /* 16-bit mono PCM */ }
-```
-
-Plus `echotalk_set_pitch` (0-63), `_volume` (0-15), `_word_delay`
-(0-15, **no effect under v1.3**, which never implemented that command),
-`_repeat_filter` (0-99, default 99 so it never triggers), `_flat`
-(monotone), `_letter_mode`, `_punctuation`, `_chunk_size` (0 disables
-chunking) and `_raw`.
-
-### Continuous speech rate
-
-`echotalk_set_speed()`, 0.25 to 4.0, is the rate control to reach for --
-`notes/continuous_speed_accumulator.md`. The chip's own SET RATE gives
-four fixed steps, all at or above normal; this gives a smooth range
-either side of it with **pitch untouched**, measured: F0 stays at
-129.0 Hz from 0.5x to 3.0x, where the clock multiplier doubles it.
-
-It works by unlocking two things MAME's loop keeps together. Pitch comes
-from `m_pitch_count`, which advances once per output sample; speech rate
-comes from how fast the parameter state machine walks a frame. Running
-that machine at a rate other than one cycle per sample changes one and
-not the other. **1.0 is byte-exact by construction** -- at 1.0 the code
-takes exactly one cycle per sample in MAME's original order.
-
-The delivered ratio is monotonic but sub-linear: 2.0 gives 1.84x and 3.0
-gives 2.56x, matching the FIFO-starvation hypothesis in
-`library_plan_rate_and_pitch.md`. Uncalibrated on purpose; smooth and
-monotonic is what a rate slider needs.
-
-### Settings are mirrored, and readable back
-
-Ctrl-E commands embedded in text still reach Textalker untouched, but
-the library now also watches them go past and updates its own variables
--- `notes/settings_mirroring.md`. Twelve getters (`echotalk_pitch()`,
-`_flat()`, `_volume()`, ...) report the voice actually in force however
-it was set.
-
-That exists so a voice can be carried to a fresh instance, which is what
-offering both Textalker versions as voice variants needs: switching
-version means a new 6502 and a Textalker back at its own defaults.
-Read from the old instance, write to the new one. Every value a getter
-returns is accepted by its matching setter.
-
-**`nP` and `nF` are one Textalker setting, not two.** `nP` sets the
-pitch and normal intonation; `nF` sets the same pitch and monotone.
-There is no separate "flatness value" and no default for one. The
-library splits them into pitch and flat and recombines them on the way
-out -- before it did that, `apply_settings` sent `%dP` unconditionally
-and silently un-flattened any voice the text had flattened.
-
-Two things measured while building it: **command letters are
-case-insensitive** (` 10p` and ` 10P` give identical audio), and
-**pitch does not saturate at 63** (` 99P` is audibly not
-` 63P`). Sniffed values are clamped to the setters' ranges anyway,
-so replaying out-of-spec input is not bit-exact -- a deliberate trade
-for getter and setter always agreeing.
-
-### Ctrl-D driver commands
-
-Driver settings are also reachable from inside the text, in the shape of
-Textalker's own Ctrl-E commands: `\x04`, optional whitespace, an
-optional number, a letter. `notes/ctrl_d_driver_commands.md`
-
-```
-\x04 2F  frame rate    \x04 0.75C clock     \x04 0B  chunking off
-\x04 1R  raw text      \x04F      default   \x04\x04 literal 0x04
-```
-
-Two things to know before using them:
-
-- **A command ends the current utterance.** Textalker buffers a whole
-  line and synthesises nothing until the CR, so a command's position in
-  the text otherwise bears no relation to its position in the audio.
-  Flushing first is what makes "before" and "after" mean anything. The
-  cost is a pause wherever a command appears.
-- **The namespaces are disjoint and the letters differ.** Ctrl-E `F` is
-  flatness and Ctrl-E `C` is compressed; Ctrl-D `F` is frame rate and
-  Ctrl-D `C` is clock. Ctrl-D does not duplicate Textalker's commands
-  because it does not need to -- Ctrl-E sequences survive text
-  preparation untouched.
-
-Settings set this way persist past the call. Bad commands are swallowed
-rather than spoken and counted in `echotalk_command_errors()`; `say`
-warns about them, and about chunking being off however it got that way.
-
-Which Textalker version you get is decided by the images passed;
-`echotalk_version()` reports the parsed banner for display.
-
-The four rate-ish controls are deliberately independent -- pitch changes
-pitch only, frame rate changes speed only, the clock multiplier changes
-both, and the sample rate changes neither. See
-`notes/library_plan_rate_and_pitch.md`.
-
-Behaviour worth knowing:
-
-- An utterance that is exactly one character after preparation and
-  chunking is wrapped in `Ctrl-E L`/`Ctrl-E A` and restored with
-  `Ctrl-E S`/`Ctrl-E W` **before the terminating CR**, so a lone letter
-  or punctuation mark is announced rather than swallowed. A bare `,` is
-  silent without the wrapping; restoring after the CR instead of before
-  it makes Textalker announce the CR as "return".
-- Boot audio is discarded, which matters most for v1.3 and its ~1.37 s
-  calibration delay.
-- Dead air is trimmed at the head of **every** utterance, not just the
-  first. Getting this wrong leaves an audible pause at every chunk
-  boundary, which is how the bug was found.
-
-**Single instance only.** Fake6502 keeps the CPU in globals, so
-`echotalk_create()` fails if one already exists. Fine for a screen
-reader; it forecloses two simultaneous voices.
-
-```
 say [options] <loader.bin> <obj.bin> [text] <out.wav>
   --file PATH   read the text from a file (omit the text argument)
+  --speed MULT  0.25-4.0, speed only, pitch unchanged — the one to use
   --rate HZ --clock MULT --frame-rate N --compressed
   --pitch N --volume N --word-delay N --repeat-filter N
   --chunk N --no-chunk --raw
 ```
 
+```
+render_text_loader [options] <loader.bin> <obj.bin> <input.bin> <out.wav>
+```
+
+The harness takes raw bytes — Echo control codes and text, high bit NOT
+set; it sets it. Options: `-v`, `--no-trim`, `--keep-chunk-gaps`,
+`--no-repeat-fix`, `--raw`, `--chunk N`, `--no-chunk`. Diagnostic
+environment variables: `ECHOTALK_CHIP_TRACE`, `ECHOTALK_RESETL4`,
+`ECHOTALK_BYTE_DUMP`, `ECHOTALK_ARRIVAL`, `ECHOTALK_POLL_TRACE`,
+`ECHOTALK_BANK_TRACE`, `ECHOTALK_PC_WATCH`, `ECHOTALK_PHASE`,
+`ECHOTALK_CPU_HZ`, `ECHOTALK_TRUE_TIMING`, `ECHOTALK_INSTANT`.
+
+## The library
+
+**`src/echotalk.h` is the API reference and documents itself.** What
+follows is only what is hard to infer from it.
+
+```c
+echotalk *et = echotalk_create(loader_path, obj_path, err, sizeof err);
+echotalk_set_speed(et, 1.5);          /* speed only, continuous       */
+echotalk_speak(et, "Hello.");         /* queues; does NOT synthesise  */
+while ((n = echotalk_read(et, buf, 1024)) > 0) { /* 16-bit mono PCM   */ }
+```
+
+### Streaming
+
+`echotalk_speak()` queues text and returns immediately; `echotalk_read()`
+synthesises one utterance at a time on demand. First audio for a 437-byte
+passage arrives in 39 ms against 220 ms for the whole thing.
+
+Synthesis measures **90–155x real time** depending on the machine, which
+is why there is no worker thread — inline synthesis from an audio
+callback has ample headroom. A host that disagrees can call
+`echotalk_synthesize()` from its own thread; the library stays
+thread-free and is **not thread-safe**.
+
+Two things a host must know:
+
+- `echotalk_available()` is **0** right after `speak()`. It means
+  "samples ready", not "speech outstanding" — that is
+  `echotalk_pending()`.
+- `echotalk_read()` returning 0 still means finished, because it
+  synthesises before giving up.
+
+### Index events
+
+`\x04 7I` places a mark; `echotalk_next_index()` collects it. Drain after
+**every** read including the one that returns 0, or a mark at the end of
+the text never fires.
+
+A mark does **not** end the utterance. It used to, which made positions
+exact and made NVDA's Say All read a wrapped sentence one line at a time.
+A mark at an utterance boundary is still exact; one inside is placed
+proportionally by character offset, which is necessarily approximate —
+Textalker emits nothing until the terminating CR, so there is no way to
+observe which character is being spoken.
+`echotalk_set_index_break()` restores the old behaviour.
+`notes/say_all_index_breaks.md`
+
+### The five rate-ish controls are independent
+
+| control | effect |
+|---|---|
+| pitch | pitch only, Textalker's own `nP` |
+| **speed** | **speed only, continuous 0.25–4.0 — use this one** |
+| frame rate | speed only, the chip's own four fixed steps |
+| clock multiplier | speed *and* pitch, the sped-up-tape effect |
+| sample rate | neither; output format only |
+
+Speed works by scaling how fast the chip's parameter state machine walks
+a frame while the lattice filter keeps producing one sample per output
+sample. **Pitch measured at 129.0 Hz from 0.5x to 3.0x**; the clock
+multiplier takes it to 258.1 Hz as it should. 1.0 is byte-exact by
+construction. The delivered ratio is monotonic but sub-linear (2.0 gives
+1.84x, 3.0 gives 2.56x), which matches FIFO starvation — Textalker's flow
+control setting the pace. Left uncalibrated on purpose.
+`notes/continuous_speed_accumulator.md`
+
+### Settings are mirrored and readable back
+
+Ctrl-E commands embedded in text still reach Textalker untouched, but the
+library also watches them go past and updates its own variables. Twelve
+getters report the voice actually in force however it was set, and every
+value a getter returns is accepted by its matching setter — which is what
+lets a voice be carried to a fresh instance when switching Textalker
+version. `notes/settings_mirroring.md`
+
+**`nP` and `nF` are one Textalker setting, not two.** `nP` sets pitch and
+normal intonation; `nF` sets the same pitch and monotone. There is no
+separate flatness value and no default for one. **Command letters are
+case-insensitive**, and **pitch does not saturate at 63** — `\x05 99P` is
+audibly not `\x05 63P`, though sniffed values are clamped to 0–63 so
+getters and setters always agree.
+
+### Behaviour worth knowing
+
+- A one-character utterance is wrapped in `Ctrl-E L`/`Ctrl-E A` and
+  restored **before the terminating CR**. A bare `,` is silent without
+  the wrapping; restoring after the CR instead makes Textalker announce
+  the CR as "return". The restore goes back to the *tracked* modes, so a
+  caller's choice of letter or punctuation mode survives.
+- Dead air is trimmed at the head of **every** utterance, not just the
+  first. Getting this wrong leaves an audible pause at every chunk
+  boundary.
+- Boot audio is discarded, which matters most for v1.3 and its ~1.37 s
+  calibration delay.
+- **Single instance only.** Fake6502 keeps the CPU in globals, so
+  `echotalk_create()` fails if one already exists. Creation costs 0.3 ms
+  (v3.1.3) or 7 ms (v1.3), so destroy-and-recreate is a perfectly good
+  way to switch voice.
+
+### Ctrl-D driver commands
+
+Driver settings are reachable from inside the text, in the shape of
+Textalker's own Ctrl-E commands: `\x04`, optional whitespace, an optional
+number, a letter. `notes/ctrl_d_driver_commands.md`
+
+```
+\x04 1.5S  speed          \x04 0.75C clock         \x04 2F  frame rate
+\x04 0B    chunking off   \x04 1R    raw text      \x04 7I  index mark
+\x04F      that setting's default      \x04\x04    one literal 0x04
+```
+
+- **A command ends the current utterance** (except index marks).
+  Textalker buffers a whole line and synthesises nothing until the CR, so
+  a command's position in the text otherwise bears no relation to its
+  position in the audio.
+- **The namespaces are disjoint and the letters differ.** Ctrl-E `F` is
+  flatness and `C` is compressed; Ctrl-D `F` is frame rate and `C` is
+  clock. Ctrl-D does not duplicate Textalker's commands because Ctrl-E
+  sequences survive text preparation untouched.
+- Bad commands are swallowed rather than spoken, and counted in
+  `echotalk_command_errors()`.
+
+## The DLL and the NVDA add-on
+
+`make dll` builds both architectures plus import libraries. 44 exports,
+undecorated cdecl on both, so `ctypes.CDLL` finds them by plain C name.
+`-static` leaves only KERNEL32 plus the C runtime the subsystem implies
+(UCRT for win64, MSVCRT for win32). **Check with
+`objdump -p echotalk.dll | grep 'DLL Name'` after touching the link
+line** — a stray `libwinpthread-1.dll` shows up as the driver silently
+failing to load on a user's machine. `notes/dll_packaging.md`
+
+`echotalk_abi_version()` returns **6**. A host loading at runtime has no
+compile-time check, so bump it whenever the surface changes.
+
+The add-on is in `nvda-addon/` and has **its own README** covering build,
+packaging, settings and diagnostics. Points that are easy to get wrong:
+
+- **Voices are discovered, not configured.** Any `<stem>.ram.bin` +
+  `<stem>.obj.bin` pair beside the driver becomes a voice, labelled from
+  the banner read by briefly booting it.
+- **Text is sanitised in the driver**, not the library: Ctrl-D, Ctrl-E
+  and Ctrl-V are replaced with a space, because the pipeline would
+  otherwise obey them and a document containing one would silently change
+  the voice. Replaced rather than deleted, so the rest of the line is
+  still spoken.
+- **Sliders are logarithmic for rate and chip clock** — 50% is 1.0x and
+  every 25% doubles. Defaults are pinned to the Echo's own values;
+  `defaultVal` on a `DriverSetting` is settable, NVDA does not insist on
+  50%.
+- **Cancellation is a generation counter, not a flag**, and `cancel()`
+  must never take the library lock. Both cost real bugs.
+  `notes/nvda_cancel_race.md`
+- **A `PitchCommand` on a monotone voice must emit `nF`, not `nP`**, or
+  NVDA's capital-letter pitch bump silently un-flattens the voice.
+- `tools/test_nvda_driver.py` runs the driver without NVDA by stubbing
+  what it imports — including the metaclass that turns `_get_x`/`_set_x`
+  into properties, which the driver depends on and a naive stub misses.
+
 ## Reference baselines (regression check after any change)
 
 **Measured with `render_text_loader`, not the library.** The library
-differs slightly and legitimately: it sends a settings block ahead of
-the text (~40 samples) and treats single-character utterances
-differently by design. Compare like with like, or re-measure this table
-with `say` and say so here.
+legitimately differs: it sends a settings block ahead of the text (~49
+samples) and treats single-character utterances differently by design.
 
-Current harness defaults (trimmed, chunked, repeat filter off), in
-samples at 8 kHz:
+Harness defaults (trimmed, chunked, repeat filter off), samples at 8 kHz:
 
 | input | v3.1.3 | v1.3 |
 |---|---|---|
@@ -298,16 +329,20 @@ samples at 8 kHz:
 | demo_bas_extracted_text | 286064 | 290753 |
 | Hedge Trimmer Story | 188764 | 187953 |
 
-**The one that matters most**: `hi_only` must render with amplitude
-range **-12127 / +26833** under both versions. That is an exact match to
-a real-hardware capture and it has survived every change so far. If it
-moves, something is wrong.
+Through the library (`say --file`), v3.1.3: hi_only **2297**, onset_this
+**10384**, chunked_paragraph_test **135213**, Hedge Trimmer Story
+**188812**. Single characters: `,` **3131**, `a` **1329**, `?` **8931**.
 
-Also expect: no `WARNING`, no `*** WILD JUMP TRAP ***`, and `make test`
-passing.
+**The one that matters most**: `hi_only` must render with amplitude range
+**−12127 / +26833** under both versions. That is an exact match to a
+real-hardware capture and has survived every change so far. If it moves,
+something is wrong.
 
-Older notes quote larger sample counts. Those predate the pacing fix and
-the dead-air trimming; do not treat them as targets.
+Also expect: no `WARNING`, no `*** WILD JUMP TRAP ***`, `make test`
+passing, and `echotalk_overruns()` zero.
+
+Older notes quote larger sample counts. Those predate the session-10
+pacing fix and dead-air trimming; **do not treat them as targets**.
 
 ## Key facts established (do not re-derive)
 
@@ -315,270 +350,127 @@ the dead-air trimming; do not treat them as targets.
   comes from the trampoline templates in the loader (`$D0xx` -> `$D000`,
   `$D4xx` -> `$D400`); the character entry comes from running the loader,
   calling `$BA69` with the Z flag set, and reading CSWL at `$36`/`$37`
-  (gives `$BA7C` for v3.1.3, `$BA82` for v1.3). Nothing is keyed to a
-  specific build, so 3.1.2/3.1.4 should work unrecognised.
+  (`$BA7C` for v3.1.3, `$BA82` for v1.3). Nothing is keyed to a specific
+  build, so 3.1.2/3.1.4 should work unrecognised.
   `notes/multi_version_support_design.md`
 - **Textalker lives in the language card at `$D000-$FFFF`, shadowing the
-  monitor ROM.** `$FDED`, `$FDF0`, `$FD1B` name Textalker code or ROM
-  depending on bank state; `LDA $C08B` selects the card, `LDA $C08A`
-  selects ROM. Both harnesses model this with an all-RTS ROM shadow. A
-  flat memory model silently writes "ROM stubs" over Textalker's image.
+  monitor ROM.** `LDA $C08B` selects the card, `LDA $C08A` selects ROM.
+  Both harnesses model this with an all-RTS ROM shadow; a flat memory
+  model silently writes "ROM stubs" over Textalker's image.
 - The loader returns with **ROM** selected, so jumping straight at the
   OBJ entry lands in the shadow. Always enter via the trampoline.
 - **The runaway guards are not tuning knobs, and a non-zero
   `echotalk_overruns()` is always a fault.** `STEP_BUDGET` was 5,000,000
-  and needed to be 20,000,000 at the slowest exposed settings; it
-  truncated speech in complete silence for weeks. It is 64,000,000 now
-  and every overrun is counted and reported.
-  `notes/step_budget_truncation.md`
+  and needed 20,000,000 at the slowest exposed settings; it truncated
+  speech in complete silence. It is 64,000,000 now and every overrun is
+  counted and reported. `notes/step_budget_truncation.md`
 - **`echotalk_chunk_text()` stops when the caller's array fills and says
-  nothing about the text it never reached.** Callers must loop until the
-  line is consumed. `src/echotalk.c` does; `tools/render_common.h` still
-  calls it once with a 256-entry array and silently drops the tail of
-  any single line needing more chunks than that (20,480 characters at
-  the default chunk size). Worth fixing.
+  nothing about the text it never reached.** Callers must loop.
+  `src/echotalk.c` does; **`tools/render_common.h` still calls it once
+  with a 256-entry array** and silently drops the tail of any line
+  needing more (20,480 characters at the default chunk size). Worth
+  fixing; left alone so far to avoid disturbing the reference harness.
 - **Textalker's own line-buffer bound is never initialised here.**
-  `$FD80-$FD82` read as zero because `$D781` is never reached -- nothing
-  plays the part of DOS/Applesoft setting up a screen. So its auto-flush
-  point is undefined and we must chunk before it can be reached.
+  `$FD80-$FD82` read as zero because `$D781` is never reached — nothing
+  plays the part of DOS setting up a screen. Its auto-flush point is
+  therefore undefined, which is why chunking is not optional.
+- **Text preparation changes lengths**, so a character offset taken
+  before it does not survive it. Anything tracking offsets must prepare
+  in runs and record offsets in the prepared buffer.
 - Compressed/expanded speech works by skipping phoneme segments, not by
   changing playback rate.
 - v1.3 does not implement the `D` (inter-word delay) command at all.
-- Textalker never uses 6502 decimal mode (measured), though BCD is now
+- Textalker never uses 6502 decimal mode (measured), though BCD is
   enabled anyway for correctness.
-- `TMS5220_READ_COMMAND_DELAY_SAMPLES = 600` in `tms5220_core.c` is
-  still a tuned hack, not derived timing. It survived the pacing
-  investigation but was never the cause of anything; treat with
-  suspicion if it ever seems implicated.
+- `TMS5220_READ_COMMAND_DELAY_SAMPLES = 600` in `tms5220_core.c` is still
+  a tuned hack, not derived timing. It survived the pacing investigation
+  but was never the cause of anything; treat with suspicion if it ever
+  seems implicated.
+- True timing (`ECHOTALK_TRUE_TIMING=1`) is implemented, produces
+  byte-identical output, and no longer clobbers anything. There is no
+  reason to switch the default. The reservation in
+  `notes/true_timing_implemented_not_the_cause.md` no longer applies.
 
 ### Echo/Textalker command reference
 
-All prefixed with Ctrl-E (`\x05`) unless noted:
-`nP` pitch 0-63 (default 24), `nF` flatness, `nV` volume 0-15
-(default 12), `nD` inter-word delay 0-15 (v3.1.3 only), `C`/`E`
-compressed/expanded, `T` talk-only, `nR` repeat filter, `\x16` (Ctrl-V)
-phoneme mode terminated by CR.
+All prefixed with Ctrl-E (`\x05`) unless noted. Case-insensitive.
+
+`nP` pitch 0-63 (default 24, normal intonation), `nF` same pitch but
+monotone, `nV` volume 0-15 (default 12), `nD` inter-word delay 0-15
+(v3.1.3 only), `C`/`E` compressed/expanded, `T` talk-only, `nR` repeat
+filter, `L`/`W` letter/word mode, `A`/`S`/`N` all/some/no punctuation,
+`\x16` (Ctrl-V) phoneme mode terminated by CR.
 
 **Send `\x05` `99` `R` once after init** to disable the repeat filter,
-which otherwise speaks `EEEEEEEEE` as `EE`. The tools do this by
-default.
+which otherwise speaks `EEEEEEEEE` as `EE`. The tools do this by default.
 
-## Fixed in session 11: single-character utterances also spoke "return"
+## Untested ground
 
-Found by Jayson by ear after the library was written, and fixed by
-reordering one line. `notes/single_char_return_bug_fixed.md`
+Everything above is verified on **x86 Windows**, plus one Linux run.
+What has not been touched:
 
-The library wraps a one-character utterance in `Ctrl-E L` (letter mode)
-and `Ctrl-E A` (all punctuation) and restores `Ctrl-E S` / `Ctrl-E W`
-afterwards, so a lone letter or punctuation mark is announced rather
-than swallowed. But the CR that terminates the utterance is itself a
-character, and in all-punctuation mode Textalker announces it as
-"return" -- so asking for one character got two spoken items.
+- **ARM is entirely untried** — no Apple Silicon, no Raspberry Pi. Jayson
+  has no ARM hardware. The bit-identical Windows/Linux result was between
+  two x86 builds and says nothing about a different architecture, which
+  is precisely where a floating-point difference would be plausible.
+  Re-run `make listen` and compare MD5s the first time anyone has one.
+- **The 32-bit build has never run on 32-bit hardware.**
+  `make test-dll-load` runs the real 32-bit binary against the real
+  32-bit DLL, but under WoW64. That covers the code being 32-bit, not the
+  machine.
+- **macOS** has never been built or run.
 
-The restore now goes **before** the CR rather than after it. Textalker
-buffers the whole line and processes it in order when the CR arrives, so
-a Ctrl-E command sitting in the buffer takes effect partway through that
-pass: the character was buffered ahead of the restore and is still
-announced, while the CR is reached after it and stays silent.
-
-Two things worth keeping from that investigation:
-
-- **`Ctrl-E W` is word mode, not punctuation mode.** Only `Ctrl-E S`
-  (some-punctuation) turns the announcement off. `\x05A,\r\x05W` still
-  says "return"; `\x05A,\x05S\r` does not.
-- The `$D009` keyboard-echo trampoline was **not** needed. Session 2 set
-  it aside because it blocks on a keypress, and that is still true; it
-  simply is not a problem this bug required solving.
-
-## The DLL
-
-`make win64-dll` / `win32-dll` / `dll` build `echotalk.dll` plus its
-import library. `notes/dll_packaging.md`
-
-21 exports, undecorated on both architectures, plain cdecl, so
-`ctypes.CDLL` finds them by plain C name. `-static` inside the shared
-link leaves only KERNEL32 plus the C runtime the subsystem implies
-(UCRT for win64, MSVCRT for win32) -- no MinGW runtime to ship. Check
-with `objdump -p echotalk.dll | grep 'DLL Name'` after touching the link
-line; the failure mode is a DLL that works here and not on a user's
-machine.
-
-`echotalk_abi_version()` returns **4**, over 41 exports. A host loading
-at runtime has no compile-time check available, so bump it whenever the
-surface changes in a way a caller could notice.
-
-Two test programs, and both are needed:
-
-```
-make test-dll        # ctypes, as NVDA would, 64-bit only
-make test-dll-load   # GetProcAddress from C, BOTH architectures
-```
-
-The second exists because the 32-bit DLL cannot be reached from Python
-here -- the only interpreter on this machine is 64-bit and Windows
-refuses a bitness mismatch at load time. Both pass, and produce
-identical sample counts across 32- and 64-bit.
-
-`make so` builds the Linux/macOS `libechotalk.so`, and it works:
-
-```
-make so
-make listen ECHOTALK_LIB=build/native/libechotalk.so
-```
-
-`tools/listen_check.py` needs only ctypes, exercises the whole surface,
-and writes a WAV whose speech announces what each section is about to
-demonstrate, so it can be checked by ear without a transcript.
-
-**The output is bit-identical across platforms.** Jayson ran this on
-Linux against a WAV produced here on Windows: same size, same MD5, no
-differences under `FC /b`. Every automated check reported the same
-numbers too, down to the index marks landing at samples 679837, 682085
-and 685599 on both.
-
-That is worth more than it looks. The pipeline carries doubles through
-the TMS5220 lattice filter, the cycle accumulator and the resampler, and
-two different compilers on two different operating systems agreed on
-every one of 1,096,604 samples. **Any future cross-platform difference
-is a bug, not floating-point drift** -- there is now a baseline saying
-so.
-
-The only figures that legitimately differ are wall-clock: synthesis
-measured 155x real time here and 91x on Jayson's Linux box. Both have
-ample headroom for inline synthesis; treat the "~136x" quoted elsewhere
-as the order of magnitude rather than a constant.
-
-### What has NOT been tested
-
-Everything so far is **x86**. Jayson has no ARM hardware and no 32-bit
-machine, so:
-
-- **ARM (including Apple Silicon and the Raspberry Pi) is entirely
-  untried.** Nothing in the sources is x86-specific, but the
-  bit-identical result above was between two x86 builds and says nothing
-  about a different architecture. Worth re-running `make listen` and
-  comparing MD5s the first time anyone has an ARM box, since that is
-  where a floating-point difference would actually be plausible.
-- **The 32-bit build has never run on 32-bit hardware.** It is exercised
-  by `make test-dll-load`, which runs the real 32-bit binary against the
-  real 32-bit DLL -- but under WoW64 on 64-bit Windows. That covers the
-  code being 32-bit; it does not cover a genuinely 32-bit machine.
-
-## Streaming and index events
-
-Both done in session 11. `notes/streaming_and_indexing.md`
-
-**`echotalk_speak()` no longer synthesises.** It queues the text and
-returns; `echotalk_read()` synthesises one utterance at a time, on
-demand. First audio for a 437-byte passage arrives in 39 ms against
-220 ms for the whole thing.
-
-Synthesis measures **~136x real time**, which is why there is no worker
-thread: doing it inline from an audio callback has ample headroom, and
-the session-6 look-ahead design would have bought only complexity. A
-host that disagrees can call `echotalk_synthesize()` from its own
-thread; the library stays thread-free.
-
-Two things a host must know:
-
-- `echotalk_available()` is **0** right after `speak()`. It means
-  "samples ready", not "speech outstanding" -- that is
-  `echotalk_pending()`.
-- `echotalk_read()` returning 0 still means finished, because it
-  synthesises before giving up. Existing read loops work unchanged.
-
-`echotalk_stop()` now abandons pending text and index events as well as
-queued audio.
-
-**Index marks** are `\x04 7I`, collected with `echotalk_next_index()`.
-They are exact rather than estimated -- the mark's position is the
-sample count at the moment the text before it finished synthesising.
-Drain them after every read **including the one that returns 0**, or a
-mark at the end of the text never fires. Like every Ctrl-D command they
-end the current utterance, so clause or sentence granularity is free but
-marking every word will make the prosody choppy.
-
-## The NVDA add-on
-
-`nvda-addon/` holds the synth driver. `nvda-addon/README.md` has the
-build and packaging steps; the short version is `make dll`, copy the two
-DLLs and your Textalker images into `synthDrivers/echotalk/`, then
-`./build_addon.sh`.
-
-Exposed as settings: voice (one per Textalker image pair found), rate,
-pitch, volume, word delay, repeat filter, chip clock, output sample rate,
-monotone, compressed. Rate drives the continuous speed control; **the
-chip's four-step frame rate is deliberately not exposed**, since the
-continuous one sounds better.
-
-Points worth not re-deriving:
-
-- **Voices are discovered, not configured.** Any `<stem>.ram.bin` +
-  `<stem>.obj.bin` pair beside the driver becomes a voice, labelled from
-  the banner read by booting it briefly. Images nobody anticipated still
-  appear correctly named.
-- **Text is sanitised in the driver**, not the library: Ctrl-D, Ctrl-E and
-  Ctrl-V are replaced with a space, because the pipeline would otherwise
-  obey them and a document containing one would silently change the
-  voice. Replaced rather than deleted, so the rest of the line is still
-  spoken.
-- **Sliders are logarithmic for rate and chip clock** -- 50% is 1.0x and
-  every 25% doubles. Linear would put normal speed at 20% and waste the
-  travel. Defaults are pinned to the Echo's own values (pitch 24, volume
-  12), not NVDA's 50%: `defaultVal` on a DriverSetting is settable.
-- **`tools/test_nvda_driver.py` runs the driver without NVDA**, by stubbing
-  the modules it imports -- including the `_get_x`/`_set_x` to property
-  metaclass, which the driver depends on. It catches everything except
-  how the settings look in NVDA's own dialogs.
-- **Cancellation is a generation counter, not a flag.** A flag has to be
-  cleared before the next utterance and there is no safe moment to do it:
-  a cancel arriving in the gap is lost, one arriving just after is applied
-  to the wrong utterance. Work captures the generation it was started for
-  and abandons itself when that number moves.
-- **`cancel()` must never take the library lock.** NVDA calls it from its
-  main thread on roughly every keystroke, and the synthesis thread holds
-  that lock while synthesising a whole utterance. Clearing the library is
-  left to the synthesis thread. This was a real freeze, not a theoretical
-  one -- see `notes/nvda_cancel_race.md`.
+**Cross-platform determinism is a recorded baseline, not an assumption.**
+Windows and Linux produced byte-identical WAVs — same MD5 over 1,096,604
+samples — despite doubles running through the lattice filter, the
+cycle-to-sample accumulator and the resampler. So a future cross-platform
+difference is a real bug, not drift.
 
 ## What is left
 
-1. Try the add-on in real NVDA. Everything below that line is checked
-   here, but nothing has been through NVDA's settings dialogs, its
-   profile switching, or its real WavePlayer.
-2. Smaller: re-measure the baseline table with `say` if the library is
-   to be the reference; the unmapped-character policy in `text_prep` is
-   a UX decision worth revisiting; continuous frame-rate control beyond
-   the four steps would need the accumulator described in
-   `notes/library_plan_rate_and_pitch.md`; `tools/` has several
-   historical probes that could be deleted.
+Nothing is blocking. In rough order of value:
 
-Note that true timing (`ECHOTALK_TRUE_TIMING=1` on the harness) is
-implemented and now clobbers nothing -- the write-latch losses that kept
-it opt-in were caused by reset wiping the `/READY` callback, since
-fixed. It still produces byte-identical output, so there is no reason to
-switch the default, but the reservation recorded in
-`notes/true_timing_implemented_not_the_cause.md` no longer applies.
+1. **Ship it.** The add-on works in real NVDA. Packaging for other people
+   means deciding how they supply Textalker images.
+2. Fix the `render_common.h` chunker truncation noted above.
+3. Delete the historical probes in `tools/`.
+4. Jayson wants a test file speaking a short sentence at **pitches 60
+   through 99**, to look at what Textalker does above its documented
+   range — `\x05 99P` is audibly not `\x05 63P`, and he suspects a
+   Textalker bug. Deferred by agreement; the library clamps to 63.
+5. The unmapped-character policy in `text_prep` is a UX decision worth
+   revisiting.
+6. Re-measure the baseline table with `say` if the library is to become
+   the reference rather than the harness.
 
 ## Working practices that paid off
 
+- **Ask for a discriminating test rather than guessing.** Twice in
+  session 11 a single observation from Jayson replaced a wrong theory
+  that had already produced code. Both times the theory was plausible and
+  both times the code would have been useless.
+- **When the question is "what does that other program do", ask that
+  program.** Fifteen minutes of logging what NVDA actually sends settled
+  what two rounds of reasoning had not.
 - **Diff against the unmodified MAME source in `third_party/tms5220/`.**
-  Four defects came from the mechanical port: two dangling-statement
-  families, a dropped `/READY` callback, and a missing `#define`. The
-  last one caused the pacing bug and was invisible to `-Wall`.
+  Four defects came from the mechanical port, including a missing
+  `#define` that caused the pacing bug and was invisible to `-Wall`.
+- **A limit that can truncate must report it.** The step budget cut
+  speech in silence. Picking a bigger number fixes today's bug; making it
+  impossible to hit one quietly is what stops the next.
 - **Check the magnitude before chasing a mechanism.** True timing was
-  implemented in full before anyone noticed its delays are 13-25 us
+  implemented in full before anyone noticed its delays are 13–25 µs
   against a 25 ms symptom.
-- **In MAME's log, trust counts, not timing.** Summing stream updates
-  between line numbers is not a clock -- it swept up idle time outside
-  the utterance and produced a target below the state machine's own
-  floor. Frame counts, byte counts and event counts are reliable.
-- **MAME's recorded audio is not chip time.** Its own sample counter
-  showed 12,911 samples where the `.wav` held 11,200.
-- **Instrument MAME directly when stuck.** Its `LOG_*` masks plus a few
-  added lines settled in one run what days of indirect measurement
-  could not. MAME logs nothing at RESETL4 while idle, which hid the
-  decisive evidence until a line was added there.
-- Verify full output duration against baselines, not just the symptom
-  being chased. A session-9 fix attempt passed its onset check while
-  silently truncating speech.
+- **Verify a regression test fails on the broken code.** A test that
+  passes either way proves nothing. Done twice in session 11, and the
+  first version of one of them did not catch its own bug.
+- **Do not assert exact equality of audio.** Four checks broke this way
+  in one session: comparing whole buffers when the claim was about
+  content, and a one-sample alignment shift making sample-wise
+  comparison meaningless. Compare content, allow a small shift, and say
+  what you actually mean.
+- **In MAME's log, trust counts, not timing.** Frame counts, byte counts
+  and event counts are reliable; anything derived from ordering across
+  the CPU/chip boundary is not. MAME's recorded audio is not chip time
+  either — its own counter showed 12,911 samples where the `.wav` held
+  11,200.
