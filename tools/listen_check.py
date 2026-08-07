@@ -179,7 +179,7 @@ def main():
     r = Report()
 
     abi = lib.echotalk_abi_version()
-    r.check("ABI version is 5", abi == 5, f"got {abi}")
+    r.check("ABI version is 6", abi == 6, f"got {abi}")
 
     err = ctypes.create_string_buffer(256)
     et = lib.echotalk_create(loader.encode(), obj.encode(), err, len(err))

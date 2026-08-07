@@ -17,7 +17,7 @@ import struct
 import time
 import sys
 
-EXPECTED_ABI = 5
+EXPECTED_ABI = 6
 
 
 class Failures:
@@ -98,6 +98,10 @@ def declare(lib):
     lib.echotalk_command_errors.argtypes = [p]
     lib.echotalk_overruns.restype = ctypes.c_uint
     lib.echotalk_overruns.argtypes = [p]
+    lib.echotalk_set_index_break.restype = ctypes.c_int
+    lib.echotalk_set_index_break.argtypes = [p, ctypes.c_int]
+    lib.echotalk_index_break.restype = ctypes.c_int
+    lib.echotalk_index_break.argtypes = [p]
     lib.echotalk_clear_command_errors.restype = None
     lib.echotalk_clear_command_errors.argtypes = [p]
 
@@ -310,17 +314,45 @@ def main():
         drain(lib, et)
 
         # --- index events ---
+        #
+        # Shaped like what NVDA actually sends, taken from a real log: a
+        # Say All arrives as ONE sequence with a mark between every line.
+        # Marks must not split that into separate utterances, which is
+        # what made a wrapped sentence read one line at a time.
+        SAYALL = (b"\x04 75IThis is  \x04 76Ia test  \x04 77Iof multiple  "
+                  b"\x04 78Iline breaks  \x04 79Ibetween words of  "
+                  b"\x04 80Ia sentence.  \x04 81I")
         marks = []
-        lib.echotalk_speak(et, b"First part.\x04 1ISecond part.\x04 2IThird.\x04 3I")
+        lib.echotalk_speak(et, SAYALL)
         audio = drain(lib, et, indices=marks)
-        f.check("all three index marks fired", [m[0] for m in marks] == [1, 2, 3],
-                str(marks))
-        f.check("index marks are in ascending order",
+        f.check("every index mark fired, in order",
+                [m[0] for m in marks] == [75, 76, 77, 78, 79, 80, 81],
+                str([m[0] for m in marks]))
+        f.check("index marks are in ascending sample order",
                 all(marks[i][1] <= marks[i + 1][1] for i in range(len(marks) - 1)),
                 str([m[1] for m in marks]))
         f.check("last mark lands at the end of the audio",
                 marks and marks[-1][1] == len(audio) // 2,
                 f"mark at {marks[-1][1] if marks else '-'}, audio {len(audio) // 2}")
+        # The whole point. Spoken as separate utterances these lines come
+        # to about 45,400 samples; as one they come to about 44,900.
+        f.check("marks do not split the sentence into separate utterances",
+                len(audio) // 2 < 45100, f"{len(audio) // 2} samples")
+        f.check("marks are spread through the utterance, not bunched at the end",
+                len(set(m[1] for m in marks)) >= 5,
+                str(sorted(set(m[1] for m in marks))))
+
+        # The old behaviour stays reachable for anyone who wants exact
+        # mid-utterance positions and will accept the split.
+        lib.echotalk_set_index_break(et, 1)
+        marks2 = []
+        lib.echotalk_speak(et, SAYALL)
+        split = drain(lib, et, indices=marks2)
+        f.check("index_break restores the splitting behaviour",
+                len(split) // 2 > len(audio) // 2,
+                f"{len(split) // 2} split vs {len(audio) // 2} continuous")
+        f.check("index_break reads back", lib.echotalk_index_break(et) == 1)
+        lib.echotalk_set_index_break(et, 0)
         f.check("index mark with no number is rejected",
                 (lambda: (lib.echotalk_clear_command_errors(et),
                           lib.echotalk_speak(et, b"Hi.\x04I"),

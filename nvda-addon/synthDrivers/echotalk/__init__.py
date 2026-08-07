@@ -47,7 +47,7 @@ SAMPLES_PER_READ = 1024
 
 # The ABI this driver was written against. echotalk_abi_version() is the
 # only check available to a host that loads the library at runtime.
-REQUIRED_ABI = 5
+REQUIRED_ABI = 6
 
 # The library's own ranges, which every slider below converts to and from.
 PITCH_MAX = 63          # Textalker nP

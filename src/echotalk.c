@@ -123,6 +123,13 @@ struct echotalk {
     struct { int index; size_t offset; } idx[256];
     size_t n_idx, idx_head;
 
+    /* Index marks waiting to be placed, carrying their CHARACTER offset
+     * into `seg`. They are resolved to sample positions as each utterance
+     * is emitted -- see resolve_marks(). */
+    struct { int index; size_t off; } mark[256];
+    size_t n_mark, mark_head;
+    int index_break;            /* 1 = old behaviour, marks split speech */
+
     /* audio queue */
     int16_t *audio;
     uint8_t *speaking;
@@ -473,6 +480,16 @@ unsigned echotalk_chunk_size(const echotalk *et) {
     return (unsigned)et->chunk_size;
 }
 
+/* 1 restores the old behaviour, where an index mark ends the utterance
+ * so its position is exact. That is what made a wrapped sentence read
+ * one line at a time under NVDA's Say All, so the default is 0. */
+int echotalk_set_index_break(echotalk *et, int on) {
+    if (on != 0 && on != 1) return -1;
+    et->index_break = on;
+    return 0;
+}
+int echotalk_index_break(const echotalk *et) { return et->index_break; }
+
 int echotalk_set_raw(echotalk *et, int raw) {
     if (raw != 0 && raw != 1) return -1;
     et->raw = raw;
@@ -798,6 +815,48 @@ static int apply_drv_cmd(echotalk *et, char letter, int has_value, double value)
  * that could sit in the middle of an utterance: a position inside one
  * is not knowable until the utterance has been spoken, and by then it
  * is too late to split it. */
+/* Places a resolved event at a known position in the output stream. */
+static int record_index_at(echotalk *et, int index, size_t offset) {
+    if (et->n_idx >= sizeof(et->idx) / sizeof(et->idx[0])) return -1;
+    et->idx[et->n_idx].index = index;
+    et->idx[et->n_idx].offset = offset;
+    et->n_idx++;
+    return 0;
+}
+
+/* Turns the marks lying inside one utterance into events.
+ *
+ * [s0, s1) is the utterance's span in `seg`; [a0, a1) is the audio it
+ * produced. A mark at the very start or end of the span lands exactly;
+ * one in the middle is placed proportionally by character offset.
+ *
+ * That interpolation is an approximation, and deliberately so. Textalker
+ * buffers a whole line and emits nothing until the terminating CR, so
+ * there is no way to observe which character is being spoken -- the only
+ * way to place a mark exactly is to END the utterance there, which is
+ * what this used to do and what made NVDA's Say All read a wrapped
+ * sentence one line at a time. Marks at an utterance boundary, which is
+ * where all but a handful of NVDA's are, stay exact either way. */
+static void resolve_marks(echotalk *et, size_t s0, size_t s1,
+                          size_t a0, size_t a1) {
+    while (et->mark_head < et->n_mark && et->mark[et->mark_head].off < s1) {
+        size_t off = et->mark[et->mark_head].off;
+        size_t pos = a0;
+        if (off > s0 && s1 > s0 && a1 > a0)
+            pos = a0 + (off - s0) * (a1 - a0) / (s1 - s0);
+        record_index_at(et, et->mark[et->mark_head].index, pos);
+        et->mark_head++;
+    }
+}
+
+/* Anything left over once the segment is exhausted belongs at the end. */
+static void resolve_trailing_marks(echotalk *et) {
+    while (et->mark_head < et->n_mark) {
+        record_index_at(et, et->mark[et->mark_head].index, et->count);
+        et->mark_head++;
+    }
+}
+
 static int record_index(echotalk *et, int index) {
     if (et->n_idx >= sizeof(et->idx) / sizeof(et->idx[0])) return -1;
     et->idx[et->n_idx].index = index;
@@ -847,11 +906,35 @@ static int at_command(const echotalk *et) {
  * Returns 1 if there is a segment to speak, 0 if the pending text ran
  * out. Reading the raw-mode flag here rather than earlier is what makes
  * a mid-text Ctrl-D 1R apply to the text after it and not before. */
-static int gather_segment(echotalk *et) {
-    while (at_command(et)) apply_pending_command(et);
-    if (et->pend_pos >= et->pend_len) return 0;
+/* If the cursor is on a Ctrl-D index command, consumes it and returns 1
+ * with the value in *out. Used to keep index marks inline rather than
+ * letting them end the segment the way every other command does. */
+static int take_index_command(echotalk *et, int *out) {
+    if (!at_command(et)) return 0;
+    size_t j = et->pend_pos + 1;
+    while (j < et->pend_len && (et->pending[j] == ' ' || et->pending[j] == '\t')) j++;
+    double value = 0.0;
+    int has_value = parse_number(et->pending, et->pend_len, &j, &value);
+    if (!has_value || j >= et->pend_len) return 0;
+    char c = et->pending[j];
+    if (c != 'I' && c != 'i') return 0;
+    int n;
+    if (drv_int(value, &n)) return 0;
+    *out = n;
+    et->pend_pos = j + 1;
+    return 1;
+}
 
-    size_t cap = et->pend_len - et->pend_pos + 1;
+/* Appends the run of literal text at the cursor to `seg`, stopping at
+ * the next command. Preparation happens per run rather than once for the
+ * whole segment, which is what lets an index mark sit between two runs
+ * and still know its offset in the PREPARED text: preparation can change
+ * the length of what it touches, so an offset taken before it would not
+ * survive. It is safe to split here because preparation is per-character
+ * and Ctrl-D is ASCII, so no multi-byte sequence is ever cut. */
+static int append_literal_run(echotalk *et) {
+    size_t start = et->pend_pos;
+    size_t cap = et->pend_len - start + 1;
     char *raw = malloc(cap);
     if (!raw) return 0;
 
@@ -870,31 +953,77 @@ static int gather_segment(echotalk *et) {
                 et->pend_pos += 2;
                 continue;
             }
-            break;      /* a command, and it applies after this text */
+            break;      /* a command */
         }
         raw[rl++] = (char)c;
         et->pend_pos++;
     }
+    if (!rl) { free(raw); return 0; }
 
     size_t need = et->raw ? rl
                           : echotalk_prep_text((const uint8_t *)raw, rl,
                                                NULL, 0, NULL);
-    if (need + 1 > et->seg_cap) {
-        char *ns = realloc(et->seg, need + 1);
+    if (et->seg_len + need + 1 > et->seg_cap) {
+        size_t ncap = et->seg_len + need + 1;
+        char *ns = realloc(et->seg, ncap);
         if (!ns) { free(raw); return 0; }
         et->seg = ns;
-        et->seg_cap = need + 1;
+        et->seg_cap = ncap;
     }
     if (et->raw) {
-        memcpy(et->seg, raw, rl);
-        et->seg[rl] = 0;
+        memcpy(et->seg + et->seg_len, raw, rl);
+        et->seg_len += rl;
     } else {
-        echotalk_prep_text((const uint8_t *)raw, rl, et->seg, need + 1, NULL);
+        echotalk_prep_text((const uint8_t *)raw, rl,
+                           et->seg + et->seg_len, need + 1, NULL);
+        et->seg_len += need;
     }
-    et->seg_len = need;
-    et->seg_pos = 0;
+    et->seg[et->seg_len] = 0;
     free(raw);
     return 1;
+}
+
+/* Applies any commands at the cursor, then gathers the run of literal
+ * text that follows into `seg`, prepared unless raw mode is on.
+ *
+ * Index marks are the one command that does NOT end the segment. NVDA
+ * puts one between every line of a Say All, and ending the utterance at
+ * each of them made a sentence wrapped over several lines read as
+ * several separate sentences. They are collected with their offset into
+ * `seg` instead and placed once the audio exists.
+ *
+ * Returns 1 if there is anything to do -- text, or marks to place.
+ * Reading the raw-mode flag here rather than earlier is what makes a
+ * mid-text Ctrl-D 1R apply to the text after it and not before. */
+static int gather_segment(echotalk *et) {
+    et->seg_len = 0;
+    et->seg_pos = 0;
+    et->n_mark = et->mark_head = 0;
+
+    for (;;) {
+        int done = 0;
+        while (at_command(et)) {
+            int index;
+            if (!et->index_break && take_index_command(et, &index)) {
+                if (et->n_mark < sizeof(et->mark) / sizeof(et->mark[0])) {
+                    et->mark[et->n_mark].index = index;
+                    et->mark[et->n_mark].off = et->seg_len;
+                    et->n_mark++;
+                } else {
+                    et->cmd_errors++;   /* more marks than can be tracked */
+                }
+                continue;
+            }
+            /* Any other command applies after whatever has been gathered,
+             * so it ends the segment -- unless nothing has been gathered
+             * yet, in which case it applies now. */
+            if (et->seg_len) { done = 1; break; }
+            apply_pending_command(et);
+        }
+        if (done || et->pend_pos >= et->pend_len) break;
+        if (!append_literal_run(et)) break;
+    }
+    return (et->seg_len > 0 || et->n_mark > 0);
 }
 
 /* Speaks the next utterance's worth of pending work, and no more.
@@ -916,9 +1045,15 @@ static int pump_one(echotalk *et) {
 
             if (line_len == 0) { et->seg_pos += skip_cr; continue; }
 
+            size_t s0, s1, before, after;
             if (!et->chunk_size || line_len <= et->chunk_size) {
+                s0 = et->seg_pos;
+                s1 = s0 + line_len;
+                before = et->count;
                 emit_utterance(et, line, line_len);
+                after = et->count;
                 et->seg_pos += line_len + skip_cr;
+                resolve_marks(et, s0, s1, before, after);
                 return 1;
             }
 
@@ -927,13 +1062,27 @@ static int pump_one(echotalk *et) {
                 et->seg_pos += line_len + skip_cr;   /* only whitespace */
                 continue;
             }
+            s0 = et->seg_pos + ch.offset;
+            s1 = s0 + ch.length;
+            before = et->count;
             emit_utterance(et, line + ch.offset, ch.length);
+            after = et->count;
             et->seg_pos += ch.offset + ch.length;
+            resolve_marks(et, s0, s1, before, after);
             return 1;
         }
 
+        /* The segment is spoken; any mark past its last utterance -- an
+         * end-of-speech marker, typically -- belongs at the end. */
+        resolve_trailing_marks(et);
         et->seg_len = et->seg_pos = 0;
         if (!gather_segment(et)) return 0;
+        /* A segment can be nothing but marks (NVDA ends a Say All with a
+         * bare index). Place them and move on rather than spinning. */
+        if (!et->seg_len) {
+            resolve_trailing_marks(et);
+            if (et->pend_pos >= et->pend_len) return 0;
+        }
     }
 }
 

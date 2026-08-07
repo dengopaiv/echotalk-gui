@@ -119,6 +119,8 @@ int main(int argc, char **argv) {
     fn_get_uint   getchk  = (fn_get_uint)sym("echotalk_chunk_size");
     fn_get_uint   errs    = (fn_get_uint)sym("echotalk_command_errors");
     fn_get_uint   overrun = (fn_get_uint)sym("echotalk_overruns");
+    fn_set_int    setibrk = (fn_set_int)sym("echotalk_set_index_break");
+    fn_get_int    getibrk = (fn_get_int)sym("echotalk_index_break");
     fn_clear      clrerrs = (fn_clear)sym("echotalk_clear_command_errors");
     fn_get_size   pending = (fn_get_size)sym("echotalk_pending");
     fn_synth      synth   = (fn_synth)sym("echotalk_synthesize");
@@ -142,10 +144,10 @@ int main(int argc, char **argv) {
     fn_get_uint   gethz   = (fn_get_uint)sym("echotalk_sample_rate");
 
     if (failures) { printf("\n%d export(s) missing\n", failures); return 1; }
-    printf("  ok    all 42 exports resolved\n");
+    printf("  ok    all 44 exports resolved\n");
 
     sprintf(detail, "got %u", abi());
-    check("abi version", abi() == 5, detail);
+    check("abi version", abi() == 6, detail);
 
     char err[256] = {0};
     void *et = create(argv[2], argv[3], err, sizeof err);
@@ -230,15 +232,31 @@ int main(int argc, char **argv) {
     check("synthesize() pre-fills the queue", prefilled >= 8000, detail);
     drain(et, rd, nextidx);
 
-    /* --- index events --- */
-    say(et, "First part. 1ISecond part. 2IThird. 3I");
+    /* --- index events ---
+     *
+     * Shaped like what NVDA actually sends, from a real log: a Say All
+     * arrives as ONE sequence with a mark between every line, and the
+     * marks must not split it into separate utterances. */
+#define SAYALL "" "75IThis is  " "" "76Ia test  " "" "77Iof multiple  "                "" "78Iline breaks  " "" "79Ibetween words of  "                "" "80Ia sentence.  " "" "81I"
+    say(et, SAYALL);
     size_t idx_total = drain(et, rd, nextidx);
-    check("all three index marks fired",
-          g_nmarks == 3 && g_marks[0] == 1 && g_marks[1] == 2 && g_marks[2] == 3, "");
+    check("every index mark fired, in order",
+          g_nmarks == 7 && g_marks[0] == 75 && g_marks[6] == 81, "");
     sprintf(detail, "last mark at %zu, audio %zu",
             g_nmarks ? g_mark_pos[g_nmarks - 1] : (size_t)0, idx_total);
     check("last mark lands at the end of the audio",
-          g_nmarks == 3 && g_mark_pos[2] == idx_total, detail);
+          g_nmarks == 7 && g_mark_pos[6] == idx_total, detail);
+    sprintf(detail, "%zu samples", idx_total);
+    check("marks do not split the sentence into separate utterances",
+          idx_total < 45100, detail);
+
+    setibrk(et, 1);
+    say(et, SAYALL);
+    size_t split = drain(et, rd, nextidx);
+    sprintf(detail, "%zu split vs %zu continuous", split, idx_total);
+    check("index_break restores the splitting behaviour",
+          split > idx_total && getibrk(et) == 1, detail);
+    setibrk(et, 0);
 
     /* The settings that make the emulation work hardest: a long
      * inter-word delay and slow speech both leave Textalker waiting on

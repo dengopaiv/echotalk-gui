@@ -59,7 +59,7 @@ typedef struct echotalk echotalk;
  * runtime -- which is what a screen reader does -- has no compile-time
  * check available, so it should call echotalk_abi_version() and compare
  * against this before anything else. */
-#define ECHOTALK_ABI_VERSION 5
+#define ECHOTALK_ABI_VERSION 6
 ECHOTALK_API unsigned echotalk_abi_version(void);
 
 /* --- lifecycle --- */
@@ -193,6 +193,24 @@ ECHOTALK_API unsigned echotalk_chunk_size(const echotalk *et);
  * otherwise fold away; note that ordinary Ctrl-E commands survive
  * preparation already and do not need it. */
 ECHOTALK_API int echotalk_set_raw(echotalk *et, int raw);
+
+/* Whether an index mark ends the utterance it sits in. 0 (default) keeps
+ * speech continuous across marks; 1 is the older behaviour.
+ *
+ * A mark's position can only be known exactly at an utterance boundary,
+ * because Textalker buffers a whole line and emits nothing until the
+ * terminating CR -- there is no way to observe which character is being
+ * spoken. Ending the utterance at each mark bought that exactness, and
+ * cost this: NVDA sends a Say All as ONE sequence with a mark between
+ * every line, so a sentence wrapped over several lines was read as
+ * several separate sentences.
+ *
+ * At 0, marks inside an utterance are placed proportionally by character
+ * offset -- approximate, and the same thing any synthesiser that keeps
+ * speech continuous must do. Marks at an utterance boundary, which is
+ * where all but a handful of NVDA's are, stay exact either way. */
+ECHOTALK_API int echotalk_set_index_break(echotalk *et, int on);
+ECHOTALK_API int echotalk_index_break(const echotalk *et);
 
 /* Threshold for Textalker's repeat-character filter, 0-99.
  *

@@ -67,6 +67,9 @@ authoritative**, not the numbers here.
   speech rate, by unlocking the parameter state machine from the audio
   path. Explains why 1.0 is byte-exact by construction, and measures
   that pitch really does stay put.
+- `say_all_index_breaks.md` — why NVDA's Say All read a wrapped sentence
+  one line at a time, and how a log of what NVDA really sends killed two
+  plausible theories before either became code.
 - `step_budget_truncation.md` — **the real cause** of speech going wrong
   at high word delay or slow speed: the 6502 step budget was four times
   too small and truncated in silence. Solved by a negative result Jayson
