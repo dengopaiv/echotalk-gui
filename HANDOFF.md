@@ -351,16 +351,34 @@ here -- the only interpreter on this machine is 64-bit and Windows
 refuses a bitness mismatch at load time. Both pass, and produce
 identical sample counts across 32- and 64-bit.
 
-`make so` exists for Linux/macOS but is **untested** -- it compiles, but
-nobody has loaded a real `.so`. `tools/listen_check.py` is the way to
-try: it needs only ctypes, exercises everything, and writes a WAV whose
-speech announces what each section is about to demonstrate, so it can be
-checked by ear without a transcript.
+`make so` builds the Linux/macOS `libechotalk.so`, and it works:
 
 ```
 make so
 make listen ECHOTALK_LIB=build/native/libechotalk.so
 ```
+
+`tools/listen_check.py` needs only ctypes, exercises the whole surface,
+and writes a WAV whose speech announces what each section is about to
+demonstrate, so it can be checked by ear without a transcript.
+
+**The output is bit-identical across platforms.** Jayson ran this on
+Linux against a WAV produced here on Windows: same size, same MD5, no
+differences under `FC /b`. Every automated check reported the same
+numbers too, down to the index marks landing at samples 679837, 682085
+and 685599 on both.
+
+That is worth more than it looks. The pipeline carries doubles through
+the TMS5220 lattice filter, the cycle accumulator and the resampler, and
+two different compilers on two different operating systems agreed on
+every one of 1,096,604 samples. **Any future cross-platform difference
+is a bug, not floating-point drift** -- there is now a baseline saying
+so.
+
+The only figures that legitimately differ are wall-clock: synthesis
+measured 155x real time here and 91x on Jayson's Linux box. Both have
+ample headroom for inline synthesis; treat the "~136x" quoted elsewhere
+as the order of magnitude rather than a constant.
 
 ## Streaming and index events
 

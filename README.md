@@ -1,6 +1,6 @@
 # EchoTalk — a from-scratch Textalker / Echo II emulator
 
-A C library (eventually a Windows DLL / Linux .so) that emulates Street
+A C library (Windows DLL and Linux .so) that emulates Street
 Electronics' TEXTALKER driving a TMS5220 on an Apple II Echo II card, so
 it can be used as a speech backend — an NVDA synth driver in
 particular — plus CLI tools that turn text into a WAV.
@@ -42,10 +42,13 @@ command changes pitch alone, the TMS5220 frame rate changes speed alone,
 the clock multiplier changes both for the sped-up-tape character, and
 the output sample rate changes neither.
 
-It also builds as a self-contained `echotalk.dll` — 21 undecorated cdecl
-exports (24 as of ABI 2), no MinGW runtime to ship, loadable straight from Python with
+It also builds as a self-contained `echotalk.dll` — 24 undecorated cdecl
+exports, no MinGW runtime to ship, loadable straight from Python with
 `ctypes` the way NVDA will. Both a Python and a C test drive it through
-that boundary; the C one exists so the 32-bit build gets tested too.
+that boundary; the C one exists so the 32-bit build gets tested too. The
+Linux `.so` builds and runs, and produces **byte-identical** audio to
+the Windows build — same MD5 over all 1,096,604 samples of the test
+run, despite doubles running through the lattice filter and resampler.
 
 Speech streams: `echotalk_speak()` queues text and returns, and
 `echotalk_read()` synthesises an utterance at a time, so the first words

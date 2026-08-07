@@ -11,3 +11,6 @@ build/
 # Local Claude Code settings (machine-specific, not shared)
 .claude/settings.local.json
 out/
+
+# Scratch space -- either of us may leave anything here
+tmp/

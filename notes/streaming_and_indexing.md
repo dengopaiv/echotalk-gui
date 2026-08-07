@@ -130,6 +130,11 @@ rebasing any uncollected index events rather than dropping them.
   text. 32-bit and 64-bit still produce identical sample counts.
 - `tools/listen_check.py` passes all 17 of its automated checks and
   writes a self-narrating WAV for the parts only an ear can judge.
+- Run again on Linux against `libechotalk.so`: all 17 pass, and the WAV
+  is **byte-identical** to the Windows one. The index marks land at
+  samples 679837, 682085 and 685599 on both, which is a sharper check of
+  the indexing arithmetic than anything written for the purpose. See
+  `dll_packaging.md` for why the determinism matters.
 
 ## ABI
 

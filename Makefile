@@ -12,8 +12,9 @@
 # Shared library, which is what a host like NVDA loads:
 #   make win64-dll / win32-dll / dll  -- echotalk.dll plus its import
 #                     library, self-contained, no MinGW runtime.
-#   make so       -- Linux/macOS libechotalk.so. UNTESTED: the machine
-#                     this was developed on is Windows.
+#   make so       -- Linux/macOS libechotalk.so. Verified on Linux: the
+#                     WAV it produces is byte-identical to the Windows
+#                     build's.
 #   make test-dll -- load the 64-bit DLL from Python via ctypes, as a
 #                     screen reader would, and check the whole surface.
 #   make test-dll-load -- the same checks from C via GetProcAddress, for

@@ -97,13 +97,28 @@ lone comma. 32-bit and 64-bit agree exactly.
   Textalker versions, `hi_only` at −12127/+26833, `make test` passes,
   and `say` still builds with no defines.
 
-## Not verified
+## Linux, and a stronger result than expected
 
-`make so` compiles, but the machine this was developed on is Windows,
-so what it produced here is not a Linux shared object and nobody has
-loaded one. The header's visibility attribute is in place and the
-sources are portable C, but treat the target as untried until someone
-runs it on a Unix.
+`make so` was written blind -- this is a Windows machine -- and was
+recorded here as untried. Jayson then built and ran it on Linux, and it
+worked first time: all 17 checks in `tools/listen_check.py` passed.
+
+The interesting part is that the WAV it produced is **byte-identical**
+to the one built here with MinGW and run on Windows. Same file size,
+same MD5, no differences under `FC /b`, and every reported number the
+same down to the index marks landing at samples 679837, 682085 and
+685599 on both.
+
+The pipeline is not integer-only: doubles run through the TMS5220
+lattice filter, the cycle-to-sample accumulator and the resampler. Two
+compilers on two operating systems agreeing on all 1,096,604 samples
+says the emulation is fully deterministic and that nothing depends on
+x87 excess precision, FMA contraction, or library `sin`/`pow`
+differences. **A future cross-platform mismatch is therefore a real bug,
+not drift**, and this is the baseline that makes that claim checkable.
+
+Only the wall-clock figures differ, as they should: synthesis ran at
+155x real time here and 91x there.
 
 ## Still to come
 
