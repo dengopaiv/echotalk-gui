@@ -352,19 +352,53 @@ refuses a bitness mismatch at load time. Both pass, and produce
 identical sample counts across 32- and 64-bit.
 
 `make so` exists for Linux/macOS but is **untested** -- it compiles, but
-nobody has loaded a real `.so`.
+nobody has loaded a real `.so`. `tools/listen_check.py` is the way to
+try: it needs only ctypes, exercises everything, and writes a WAV whose
+speech announces what each section is about to demonstrate, so it can be
+checked by ear without a transcript.
+
+```
+make so
+make listen ECHOTALK_LIB=build/native/libechotalk.so
+```
+
+## Streaming and index events
+
+Both done in session 11. `notes/streaming_and_indexing.md`
+
+**`echotalk_speak()` no longer synthesises.** It queues the text and
+returns; `echotalk_read()` synthesises one utterance at a time, on
+demand. First audio for a 437-byte passage arrives in 39 ms against
+220 ms for the whole thing.
+
+Synthesis measures **~136x real time**, which is why there is no worker
+thread: doing it inline from an audio callback has ample headroom, and
+the session-6 look-ahead design would have bought only complexity. A
+host that disagrees can call `echotalk_synthesize()` from its own
+thread; the library stays thread-free.
+
+Two things a host must know:
+
+- `echotalk_available()` is **0** right after `speak()`. It means
+  "samples ready", not "speech outstanding" -- that is
+  `echotalk_pending()`.
+- `echotalk_read()` returning 0 still means finished, because it
+  synthesises before giving up. Existing read loops work unchanged.
+
+`echotalk_stop()` now abandons pending text and index events as well as
+queued audio.
+
+**Index marks** are `\x04 7I`, collected with `echotalk_next_index()`.
+They are exact rather than estimated -- the mark's position is the
+sample count at the moment the text before it finished synthesising.
+Drain them after every read **including the one that returns 0**, or a
+mark at the end of the text never fires. Like every Ctrl-D command they
+end the current utterance, so clause or sentence granularity is free but
+marking every word will make the prosody choppy.
 
 ## What is left
 
-1. **Streaming.** `echotalk_speak()` synthesises the whole utterance
-   before `echotalk_read()` returns anything. NVDA wants audio as it is
-   generated -- the look-ahead design is in
-   `notes/buffer_chunking_and_indexing.md`.
-2. **Index events** for NVDA's `IndexReached`, same note. This one will
-   add entry points, so it will need an ABI version bump; streaming
-   probably will not, since it changes when `echotalk_read` returns data
-   rather than its signature.
-3. Smaller: re-measure the baseline table with `say` if the library is
+1. Smaller: re-measure the baseline table with `say` if the library is
    to be the reference; the unmapped-character policy in `text_prep` is
    a UX decision worth revisiting; continuous frame-rate control beyond
    the four steps would need the accumulator described in

@@ -11,8 +11,9 @@ reimplemented or approximated.
 
 ## Status
 
-**The emulation is complete and validated, the library works, and it
-builds as a DLL. What is left is making it stream.**
+**The emulation is complete and validated, the library works, it builds
+as a DLL, it streams, and it reports index events.** Everything the NVDA
+backend needs is in place.
 
 - Speech matches a real-hardware capture exactly in amplitude
   (-12127/+26833 for "HI") and matches MAME frame-for-frame and
@@ -42,12 +43,16 @@ the clock multiplier changes both for the sped-up-tape character, and
 the output sample rate changes neither.
 
 It also builds as a self-contained `echotalk.dll` — 21 undecorated cdecl
-exports, no MinGW runtime to ship, loadable straight from Python with
+exports (24 as of ABI 2), no MinGW runtime to ship, loadable straight from Python with
 `ctypes` the way NVDA will. Both a Python and a C test drive it through
 that boundary; the C one exists so the 32-bit build gets tested too.
 
-What remains is streaming audio out (speech is currently synthesised in
-full before it can be read) and NVDA index-event reporting.
+Speech streams: `echotalk_speak()` queues text and returns, and
+`echotalk_read()` synthesises an utterance at a time, so the first words
+are audible in 39 ms rather than after the whole passage is made.
+Synthesis runs at roughly 136x real time, so it needs no thread of its
+own. Index marks embedded in the text report progress exactly, since the
+sample counts they refer to are ones we generated rather than estimated.
 
 **Start with [HANDOFF.md](HANDOFF.md)** — it has the current state,
 build and run instructions, reference baselines, and the facts worth not

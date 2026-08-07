@@ -127,7 +127,7 @@ endif
 BUILD_DIR = build
 
 .PHONY: all native win64 win32 windows test clean check-mingw64 check-mingw32 \
-        win64-dll win32-dll dll so test-dll test-dll-load
+        win64-dll win32-dll dll so test-dll test-dll-load listen
 
 all: native
 
@@ -223,6 +223,16 @@ so:
 test-dll: win64-dll
 	$(PYTHON) tools/test_dll.py $(BUILD_DIR)/win64/echotalk.dll \
 	  roms/textalker.ram.bin roms/textalker.obj.bin
+
+# Writes a WAV in which the speech announces what each section is about
+# to demonstrate, so it can be checked by ear straight through. Also the
+# way to check a Linux build, since it only needs ctypes:
+#   make so && make listen ECHOTALK_LIB=build/native/libechotalk.so
+ECHOTALK_LIB ?= $(BUILD_DIR)/win64/echotalk.dll
+
+listen:
+	$(PYTHON) tools/listen_check.py $(ECHOTALK_LIB) \
+	  roms/textalker.ram.bin roms/textalker.obj.bin listen.wav
 
 # The same checks from C, resolving every export through GetProcAddress
 # rather than linking. This is how the 32-bit DLL gets verified at all

@@ -44,14 +44,20 @@ authoritative**, not the numbers here.
   written off on a measurement that had silently not taken effect.
 - `multi_version_support_design.md` — how one binary handles both
   Textalker versions, detected structurally rather than by hash.
-- `buffer_chunking_and_indexing.md` — chunking rationale and the
-  **not yet implemented** look-ahead synthesis / NVDA index-event plan.
+- `buffer_chunking_and_indexing.md` — chunking rationale, plus the
+  original look-ahead synthesis / index-event plan. **Superseded** by
+  `streaming_and_indexing.md`, which implemented both differently:
+  measurement showed the worker thread it proposes is unnecessary.
 - `tms5220_port_and_audio_pipeline.md` — how the TMS5220 port was made.
 - `mingw_build_system.md` — build targets, runtimes, and the
   wrong-architecture trap the Makefile now guards against.
 - `dll_packaging.md` — the export surface, calling convention, runtime
   dependencies and ABI version, plus why there are two DLL test
   programs rather than one.
+- `streaming_and_indexing.md` — pull-driven synthesis and exact index
+  events. Why the session-6 worker-thread design was dropped (synthesis
+  runs at ~136x real time), and why index marks being Ctrl-D commands
+  makes their offsets free.
 
 ## Superseded, kept for the reasoning only
 

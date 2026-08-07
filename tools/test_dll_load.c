@@ -42,6 +42,9 @@ typedef size_t (*fn_read)(void *, int16_t *, size_t);
 typedef size_t (*fn_avail)(const void *);
 typedef void  (*fn_stop)(void *);
 typedef unsigned (*fn_get_uint)(const void *);
+typedef size_t (*fn_get_size)(const void *);
+typedef size_t (*fn_synth)(void *, size_t);
+typedef int   (*fn_next_index)(void *, int *);
 typedef void  (*fn_clear)(void *);
 
 static HMODULE lib;
@@ -52,11 +55,28 @@ static void *sym(const char *name) {
     return p;
 }
 
-/* Drains the queue and returns how many samples came out. */
-static size_t drain(void *et, fn_read rd) {
+/* Drains the queue and returns how many samples came out. Index events
+ * are collected after every read INCLUDING the final one that returns 0,
+ * since a mark at the very end of the text only becomes ready then. */
+static int g_marks[32], g_nmarks;
+static size_t g_mark_pos[32];
+
+static size_t drain(void *et, fn_read rd, fn_next_index nextidx) {
     int16_t block[1024];
     size_t total = 0, n;
-    while ((n = rd(et, block, 1024)) > 0) total += n;
+    g_nmarks = 0;
+    for (;;) {
+        n = rd(et, block, 1024);
+        total += n;
+        if (nextidx) {
+            int idx;
+            while (nextidx(et, &idx) && g_nmarks < 32) {
+                g_mark_pos[g_nmarks] = total;
+                g_marks[g_nmarks++] = idx;
+            }
+        }
+        if (n == 0) break;
+    }
     return total;
 }
 
@@ -97,12 +117,15 @@ int main(int argc, char **argv) {
     fn_get_uint   getchk  = (fn_get_uint)sym("echotalk_chunk_size");
     fn_get_uint   errs    = (fn_get_uint)sym("echotalk_command_errors");
     fn_clear      clrerrs = (fn_clear)sym("echotalk_clear_command_errors");
+    fn_get_size   pending = (fn_get_size)sym("echotalk_pending");
+    fn_synth      synth   = (fn_synth)sym("echotalk_synthesize");
+    fn_next_index nextidx = (fn_next_index)sym("echotalk_next_index");
 
     if (failures) { printf("\n%d export(s) missing\n", failures); return 1; }
-    printf("  ok    all 21 exports resolved\n");
+    printf("  ok    all 24 exports resolved\n");
 
     sprintf(detail, "got %u", abi());
-    check("abi version", abi() == 1, detail);
+    check("abi version", abi() == 2, detail);
 
     char err[256] = {0};
     void *et = create(argv[2], argv[3], err, sizeof err);
@@ -118,7 +141,7 @@ int main(int argc, char **argv) {
     if (second) destroy(second);
 
     if (say(et, "Hello there.") != 0) { check("speak", 0, "returned nonzero"); }
-    size_t plain = drain(et, rd);
+    size_t plain = drain(et, rd, nextidx);
     sprintf(detail, "%zu samples", plain);
     check("speak and read", plain > 4000, detail);
     check("queue drained", avail(et) == 0, "");
@@ -128,7 +151,7 @@ int main(int argc, char **argv) {
      * being accepted. */
     check("set_clock_multiplier(2.0)", setclk(et, 2.0) == 0, "");
     say(et, "Hello there.");
-    size_t fast = drain(et, rd);
+    size_t fast = drain(et, rd, nextidx);
     double ratio = fast ? (double)plain / (double)fast : 0.0;
     sprintf(detail, "%zu vs %zu samples, ratio %.2f", plain, fast, ratio);
     check("clock multiplier crosses the ABI", ratio > 1.8 && ratio < 2.2, detail);
@@ -148,27 +171,58 @@ int main(int argc, char **argv) {
      * host's only way to notice a typo. */
     clrerrs(et);
     say(et, "\x04" "9ZOne.");
-    drain(et, rd);
+    drain(et, rd, nextidx);
     sprintf(detail, "got %u", errs(et));
     check("bad Ctrl-D counted", errs(et) == 1, detail);
     clrerrs(et);
     check("error counter clears", errs(et) == 0, "");
 
     say(et, "\x04" "2FHello there.");
-    size_t ctrl_d = drain(et, rd);
+    size_t ctrl_d = drain(et, rd, nextidx);
     sprintf(detail, "%zu vs %zu samples", ctrl_d, plain);
     check("Ctrl-D frame rate through the ABI", ctrl_d < plain, detail);
     check("no errors from a good command", errs(et) == 0, "");
     setrate(et, 0);   /* Ctrl-D settings persist; undo before measuring below */
 
     say(et, "Discard this please.");
-    check("audio queued before stop", avail(et) > 0, "");
+    check("text queued before stop", pending(et) > 0, "");
     stop(et);
-    check("stop drains the queue", avail(et) == 0, "");
+    check("stop clears the queue", avail(et) == 0 && pending(et) == 0, "");
+
+    /* --- streaming --- speak() must not synthesise. */
+    const char *longtext =
+        "This is a fairly long passage, long enough to be split into several "
+        "chunks, so that streaming has something to actually stream. It keeps "
+        "going for a while yet.";
+    say(et, longtext);
+    sprintf(detail, "%zu samples queued, %zu bytes pending",
+            avail(et), pending(et));
+    check("speak() returns without synthesising",
+          avail(et) == 0 && pending(et) > 0, detail);
+    size_t streamed = drain(et, rd, nextidx);
+    sprintf(detail, "%zu samples", streamed);
+    check("streamed text is fully spoken",
+          streamed > 4000 && pending(et) == 0, detail);
+
+    say(et, longtext);
+    size_t prefilled = synth(et, 8000);
+    sprintf(detail, "%zu samples ready before any read", prefilled);
+    check("synthesize() pre-fills the queue", prefilled >= 8000, detail);
+    drain(et, rd, nextidx);
+
+    /* --- index events --- */
+    say(et, "First part. 1ISecond part. 2IThird. 3I");
+    size_t idx_total = drain(et, rd, nextidx);
+    check("all three index marks fired",
+          g_nmarks == 3 && g_marks[0] == 1 && g_marks[1] == 2 && g_marks[2] == 3, "");
+    sprintf(detail, "last mark at %zu, audio %zu",
+            g_nmarks ? g_mark_pos[g_nmarks - 1] : (size_t)0, idx_total);
+    check("last mark lands at the end of the audio",
+          g_nmarks == 3 && g_mark_pos[2] == idx_total, detail);
 
     /* The session-11 single-character fix, through the ABI. */
     say(et, ",");
-    size_t comma = drain(et, rd);
+    size_t comma = drain(et, rd, nextidx);
     sprintf(detail, "%zu samples; over ~7000 means \"return\" is back", comma);
     check("single character is short", comma < 4000, detail);
 

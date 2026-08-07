@@ -14,9 +14,10 @@ The Python interpreter's bitness must match the DLL's.
 import ctypes
 import os
 import struct
+import time
 import sys
 
-EXPECTED_ABI = 1
+EXPECTED_ABI = 2
 
 
 class Failures:
@@ -71,6 +72,12 @@ def declare(lib):
                                   ctypes.c_size_t]
     lib.echotalk_available.restype = ctypes.c_size_t
     lib.echotalk_available.argtypes = [p]
+    lib.echotalk_pending.restype = ctypes.c_size_t
+    lib.echotalk_pending.argtypes = [p]
+    lib.echotalk_synthesize.restype = ctypes.c_size_t
+    lib.echotalk_synthesize.argtypes = [p, ctypes.c_size_t]
+    lib.echotalk_next_index.restype = ctypes.c_int
+    lib.echotalk_next_index.argtypes = [p, ctypes.POINTER(ctypes.c_int)]
     lib.echotalk_stop.restype = None
     lib.echotalk_stop.argtypes = [p]
     lib.echotalk_command_errors.restype = ctypes.c_uint
@@ -79,15 +86,25 @@ def declare(lib):
     lib.echotalk_clear_command_errors.argtypes = [p]
 
 
-def drain(lib, et, block=1024):
-    """Pull PCM the way an audio callback would, in small blocks."""
+def drain(lib, et, block=1024, indices=None):
+    """Pull PCM the way an audio callback would, in small blocks.
+
+    Collects index events after every read INCLUDING the final one that
+    returns 0, since a mark at the very end of the text only becomes
+    ready then. If `indices` is a list, (index, sample_position) pairs
+    are appended to it.
+    """
     buf = (ctypes.c_int16 * block)()
     out = bytearray()
+    idx = ctypes.c_int()
     while True:
         n = lib.echotalk_read(et, buf, block)
+        out += bytes(buf)[:n * 2]
+        while lib.echotalk_next_index(et, ctypes.byref(idx)):
+            if indices is not None:
+                indices.append((idx.value, len(out) // 2))
         if n == 0:
             break
-        out += bytes(buf)[:n * 2]
     return out
 
 
@@ -208,11 +225,15 @@ def main():
                 f"{len(ctrl_d) // 2} vs {len(plain) // 2} samples")
         f.check("no errors from a good command", lib.echotalk_command_errors(et) == 0)
 
-        # stop() must discard queued audio without disturbing Textalker.
+        # stop() must discard everything outstanding without disturbing
+        # Textalker. Note speak() queues text, not audio, so it is
+        # pending() rather than available() that is non-zero here.
         lib.echotalk_speak(et, b"Discard this please.")
-        f.check("audio queued before stop", lib.echotalk_available(et) > 0)
+        f.check("text queued before stop", lib.echotalk_pending(et) > 0,
+                f"{lib.echotalk_pending(et)} bytes")
         lib.echotalk_stop(et)
-        f.check("stop drains the queue", lib.echotalk_available(et) == 0)
+        f.check("stop clears the queue",
+                lib.echotalk_available(et) == 0 and lib.echotalk_pending(et) == 0)
         after = speak(lib, et, "Hello there.")
         f.check("speech survives stop", len(after) > 8000,
                 f"{len(after) // 2} samples")
@@ -228,6 +249,78 @@ def main():
                 f"{len(comma) // 2} samples; over ~7000 means 'return' is back")
 
         f.check("empty string is harmless", lib.echotalk_speak(et, b"") == 0)
+
+        # --- streaming ---
+        #
+        # speak() must return without synthesising, so a host is not
+        # blocked for the length of the utterance before the first
+        # sample exists.
+        long_text = ("This is a fairly long passage, long enough to be split "
+                     "into several chunks, so that streaming has something to "
+                     "actually stream. It keeps going for a while yet.")
+        t0 = time.perf_counter()
+        lib.echotalk_speak(et, long_text.encode())
+        t_speak = time.perf_counter() - t0
+        f.check("speak() returns without synthesising",
+                lib.echotalk_available(et) == 0 and t_speak < 0.01,
+                f"{t_speak * 1000:.1f} ms, {lib.echotalk_available(et)} samples queued")
+        f.check("pending reports outstanding text", lib.echotalk_pending(et) > 0,
+                f"{lib.echotalk_pending(et)} bytes")
+
+        buf = (ctypes.c_int16 * 1024)()
+        t0 = time.perf_counter()
+        first = lib.echotalk_read(et, buf, 1024)
+        t_first = time.perf_counter() - t0
+        rest = first
+        while True:
+            n = lib.echotalk_read(et, buf, 1024)
+            if n == 0:
+                break
+            rest += n
+        t_total = time.perf_counter() - t0
+        f.check("first audio arrives before the rest is made",
+                first > 0 and t_first < t_total / 2,
+                f"first block {t_first * 1000:.1f} ms, all {rest} samples "
+                f"{t_total * 1000:.1f} ms")
+        f.check("everything was spoken", lib.echotalk_pending(et) == 0 and
+                lib.echotalk_available(et) == 0)
+
+        # synthesize() is the alternative for a host that would rather
+        # not run synthesis inside its audio callback.
+        lib.echotalk_speak(et, long_text.encode())
+        got = lib.echotalk_synthesize(et, 8000)
+        f.check("synthesize() pre-fills the queue", got >= 8000,
+                f"{got} samples ready before any read")
+        drain(lib, et)
+
+        # --- index events ---
+        marks = []
+        lib.echotalk_speak(et, b"First part.\x04 1ISecond part.\x04 2IThird.\x04 3I")
+        audio = drain(lib, et, indices=marks)
+        f.check("all three index marks fired", [m[0] for m in marks] == [1, 2, 3],
+                str(marks))
+        f.check("index marks are in ascending order",
+                all(marks[i][1] <= marks[i + 1][1] for i in range(len(marks) - 1)),
+                str([m[1] for m in marks]))
+        f.check("last mark lands at the end of the audio",
+                marks and marks[-1][1] == len(audio) // 2,
+                f"mark at {marks[-1][1] if marks else '-'}, audio {len(audio) // 2}")
+        f.check("index mark with no number is rejected",
+                (lambda: (lib.echotalk_clear_command_errors(et),
+                          lib.echotalk_speak(et, b"Hi.\x04I"),
+                          drain(lib, et),
+                          lib.echotalk_command_errors(et))[-1])() == 1)
+
+        # --- stop() abandons pending text, not just queued audio ---
+        lib.echotalk_speak(et, long_text.encode())
+        lib.echotalk_stop(et)
+        f.check("stop() discards unsynthesised text",
+                lib.echotalk_pending(et) == 0 and lib.echotalk_available(et) == 0)
+        f.check("read() after stop returns nothing",
+                lib.echotalk_read(et, buf, 1024) == 0)
+        after = speak(lib, et, "Hello there.")
+        f.check("speech works again after stop", len(after) > 4000,
+                f"{len(after) // 2} samples")
     finally:
         lib.echotalk_destroy(et)
         print("  ok    destroy")

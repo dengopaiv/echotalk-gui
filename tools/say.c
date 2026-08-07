@@ -74,9 +74,10 @@ int main(int argc, char **argv) {
             "\n"
             "The text may also carry Ctrl-D driver commands: 0x04, an optional\n"
             "number, then a letter. 2F frame rate, 0.75C clock, 0B chunking off,\n"
-            "1R raw on; a bare letter restores that setting's default, and a\n"
-            "doubled 0x04 is one literal 0x04. Each command ends the current\n"
-            "utterance, so what precedes it speaks at the old settings.\n",
+            "1R raw on, 7I an index mark; a bare letter restores that setting's\n"
+            "default, and a doubled 0x04 is one literal 0x04. Each command ends\n"
+            "the current utterance, so what precedes it speaks at the old\n"
+            "settings. Index marks are reported on stderr as they are reached.\n",
             argv[0]);
         return 1;
     }
@@ -135,7 +136,10 @@ int main(int argc, char **argv) {
                         "line buffer reaches an undefined flush point, and "
                         "how it breaks is uncharacterised\n");
 
-    /* Pull in small blocks, the way an audio callback would. */
+    /* Pull in small blocks, the way an audio callback would. Since the
+     * library streams, this is also where synthesis happens -- speak()
+     * above only queued the text. Index events are collected after each
+     * block, which is how a host turns them into progress reports. */
     size_t cap = 65536, n = 0;
     int16_t *pcm = malloc(cap * sizeof(int16_t)), block[1024];
     size_t got;
@@ -143,6 +147,19 @@ int main(int argc, char **argv) {
         if (n + got > cap) { cap = (n + got) * 2; pcm = realloc(pcm, cap * sizeof(int16_t)); }
         memcpy(pcm + n, block, got * sizeof(int16_t));
         n += got;
+        int idx;
+        while (echotalk_next_index(et, &idx))
+            fprintf(stderr, "index %d reached at sample %zu (%.3f s)\n",
+                    idx, n, (double)n / (rate ? rate : 8000));
+    }
+    /* Once more after the final read: a mark at the very end of the text
+     * only becomes ready on the read that returns 0, and an end-of-speech
+     * marker is exactly what a host is most likely to put there. */
+    {
+        int idx;
+        while (echotalk_next_index(et, &idx))
+            fprintf(stderr, "index %d reached at sample %zu (%.3f s)\n",
+                    idx, n, (double)n / (rate ? rate : 8000));
     }
 
     /* The library delivers at the rate it was asked for -- the clock

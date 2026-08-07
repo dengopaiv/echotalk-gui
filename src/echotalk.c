@@ -59,14 +59,35 @@ struct echotalk {
     unsigned cmd_errors;        /* malformed Ctrl-D commands seen */
     int settings_dirty;
 
-    /* one mark per utterance, for dead-air trimming */
-    size_t marks[4096];
-    size_t nmarks;
+    /* --- streaming ---
+     *
+     * echotalk_speak() no longer synthesises; it appends to `pending`
+     * and returns. echotalk_read() synthesises one utterance at a time,
+     * on demand, so a caller hears the first chunk without waiting for
+     * the last. Synthesis measures ~136x real time, so doing it inline
+     * from an audio callback has ample headroom; a host that would
+     * rather not can call echotalk_synthesize() from its own thread.
+     *
+     * `pending` is raw text with its Ctrl-D parse cursor. `seg` is the
+     * prepared body of the segment currently being consumed, chunk by
+     * chunk. Commands are applied when `seg` runs out, which is what
+     * puts them after everything that preceded them in the text. */
+    char *pending; size_t pend_len, pend_pos, pend_cap;
+    char *seg;     size_t seg_len, seg_pos, seg_cap;
+
+    /* Index events, in text order. `offset` is an absolute position in
+     * the output stream; an event is ready once read_pos reaches it. */
+    struct { int index; size_t offset; } idx[256];
+    size_t n_idx, idx_head;
 
     /* audio queue */
     int16_t *audio;
     uint8_t *speaking;
     size_t count, cap, read_pos;
+
+    /* Carried across resampler calls so that per-utterance resampling
+     * does not reset the interpolation phase at every boundary. */
+    double resamp_phase;
 
     int aborted;
 };
@@ -289,7 +310,8 @@ echotalk *echotalk_create(const char *loader_path, const char *obj_path,
     g_active = et;
     if (boot(et, loader_path, obj_path, errbuf, errbuf_len) != 0) {
         g_active = NULL;
-        free(et->audio); free(et->speaking); free(et);
+        free(et->audio); free(et->speaking);
+    free(et->pending); free(et->seg); free(et);
         return NULL;
     }
     return et;
@@ -298,7 +320,8 @@ echotalk *echotalk_create(const char *loader_path, const char *obj_path,
 void echotalk_destroy(echotalk *et) {
     if (!et) return;
     if (g_active == et) g_active = NULL;
-    free(et->audio); free(et->speaking); free(et);
+    free(et->audio); free(et->speaking);
+    free(et->pending); free(et->seg); free(et);
 }
 
 unsigned echotalk_abi_version(void) { return ECHOTALK_ABI_VERSION; }
@@ -401,142 +424,83 @@ static void apply_settings(echotalk *et) {
  * mode, since it was buffered ahead of the restore. */
 static void send_utterance(echotalk *et, const char *s, size_t len) {
     int single = (len == 1);
-    /* Record where this utterance's audio starts. Textalker processes a
-     * whole line before sending anything to the chip, and that work
-     * scales with the amount of text, so every utterance is preceded by
-     * dead air proportional to its length. Trimming needs one mark per
-     * utterance, not one per speak() call -- otherwise the pause at
-     * every chunk boundary survives. */
-    if (et->nmarks < sizeof(et->marks) / sizeof(et->marks[0]))
-        et->marks[et->nmarks++] = et->count;
     if (single) send_string(et, "\x05L\x05" "A");
     for (size_t i = 0; i < len; i++) send_char(et, (uint8_t)s[i]);
     if (single) send_string(et, "\x05S\x05W");
     send_char(et, '\r');
 }
 
-/* Sends one line, split if it is longer than the current chunk size.
+/* Speaks one utterance and finishes its audio off completely: drained,
+ * trimmed and converted to the output format before returning.
  *
- * The chunker is called in batches rather than once. It stops when the
- * array it was given fills up, and a single call with a fixed array
- * silently drops everything past that point -- 20,480 characters at the
- * default chunk size, which is why this went unnoticed, but only 2,048
- * at a chunk size of 8, which Ctrl-D B now makes reachable. Looping
- * until the line is consumed removes the ceiling. */
-static void send_line(echotalk *et, const char *line, size_t len) {
-    if (!len) return;
-    if (!et->chunk_size || len <= et->chunk_size) {
-        send_utterance(et, line, len);
-        return;
-    }
-    size_t off = 0;
-    while (off < len) {
-        echotalk_chunk chunks[64];
-        size_t n = echotalk_chunk_text(line + off, len - off, et->chunk_size,
-                                       chunks, sizeof chunks / sizeof chunks[0]);
-        if (!n) break;                  /* only whitespace left */
-        for (size_t c = 0; c < n; c++)
-            send_utterance(et, line + off + chunks[c].offset, chunks[c].length);
-        size_t consumed = chunks[n - 1].offset + chunks[n - 1].length;
-        if (!consumed) break;           /* no progress; refuse to spin */
-        off += consumed;
-    }
-}
+ * Doing all of that per utterance rather than once per speak() call is
+ * what makes streaming possible -- audio is only safe to hand out once
+ * nothing further will move it, and trimming moves it. It also keeps
+ * the trimming rule intact: dead air is removed at the head of EVERY
+ * utterance, which is what stops a pause appearing at every chunk
+ * boundary. */
+static void emit_utterance(echotalk *et, const char *s, size_t len) {
+    /* Push any changed Ctrl-E settings first, and deliberately before
+     * `start` is taken: the handful of samples that costs then sits
+     * outside the trimmed range, which is where it has always sat. */
+    apply_settings(et);
 
-/* One stretch of text spoken at a single set of driver settings.
- *
- * This is everything echotalk_speak() used to be. It became a helper
- * when Ctrl-D commands made one speak() call able to change settings
- * partway through: trimming and resampling both depend on settings a
- * later command may change, so each run is finished off on its own. */
-static int speak_run(echotalk *et, const char *text, size_t len) {
-    char *prepped = NULL;
-    const char *body = text;
-    size_t body_len = len;
+    size_t start = et->count;
 
-    if (!et->raw) {
-        size_t need = echotalk_prep_text((const uint8_t *)text, len,
-                                         NULL, 0, NULL);
-        prepped = malloc(need + 1);
-        if (!prepped) return -1;
-        echotalk_prep_text((const uint8_t *)text, len, prepped, need + 1, NULL);
-        body = prepped;
-        body_len = need;
-    }
+    send_utterance(et, s, len);
 
-    /* Mark where this utterance's audio begins so the think-time dead
-     * air before it can be trimmed; CR is what makes Textalker speak. */
-    size_t utt_start = et->count;
-    et->nmarks = 0;
-
-    const char *line = body;
-    size_t remaining = body_len;
-    while (remaining) {
-        size_t line_len = 0;
-        while (line_len < remaining && line[line_len] != '\r') line_len++;
-        send_line(et, line, line_len);
-        if (line_len >= remaining) break;
-        line += line_len + 1;
-        remaining -= line_len + 1;
-    }
-    free(prepped);
-
-    /* Drain any speech still in flight. */
+    /* Drain what is still in flight before touching the samples. */
     int guard = 0;
     while (tms5220_talk_status(&et->tms) && guard++ < 500000)
         tick_chip(et, (uint32_t)CYCLES_PER_SAMPLE);
 
-    /* Trim the dead air at the head of every utterance, closing the gap
-     * up as we go.
+    /* Trim the dead air at the head of this utterance.
      *
-     * The scan stops at the first sample that is both played by the chip
+     * Textalker processes a whole line before it sends anything to the
+     * chip, and that work scales with how much text there is, so every
+     * utterance is preceded by silence proportional to its length. The
+     * scan stops at the first sample that is both played by the chip
      * (TALKD set) and audible. Both conditions matter: TALKD alone stops
      * on the obligatory silent frame emitted when speech restarts, which
      * is an artifact rather than content, and amplitude alone can stop
      * on a stray non-zero sample while the chip is idle. Because it
      * halts at the first audible output, it can only ever consume
-     * silence at the head of an utterance -- a pause after a comma or
-     * period follows audible speech and is unreachable. */
-    size_t w = utt_start, pos = utt_start;
-    for (size_t m = 0; m < et->nmarks; m++) {
-        size_t start = (m == 0) ? utt_start : et->marks[m];
-        size_t end   = (m + 1 < et->nmarks) ? et->marks[m + 1] : et->count;
-        if (start < pos) start = pos;
-        if (end < start) end = start;
-
-        size_t i = start, skip = 0;
-        while (i < end) {
-            int mag = et->audio[i] < 0 ? -et->audio[i] : et->audio[i];
-            if (et->speaking[i] && mag > TRIM_THRESHOLD) break;
-            i++;
-        }
-        if (i < end) {              /* nothing audible -> keep it all */
-            size_t run = i - start;
-            if (run > TRIM_MARGIN) skip = run - TRIM_MARGIN;
-        }
-        for (size_t k = start + skip; k < end; k++) {
-            et->audio[w] = et->audio[k];
-            et->speaking[w] = et->speaking[k];
-            w++;
-        }
-        pos = end;
+     * silence at the head -- a pause after a comma or period follows
+     * audible speech and is unreachable. */
+    size_t i = start;
+    while (i < et->count) {
+        int mag = et->audio[i] < 0 ? -et->audio[i] : et->audio[i];
+        if (et->speaking[i] && mag > TRIM_THRESHOLD) break;
+        i++;
     }
-    if (et->nmarks) et->count = w;
+    if (i < et->count) {              /* nothing audible -> keep it all */
+        size_t run = i - start;
+        if (run > TRIM_MARGIN) {
+            size_t skip = run - TRIM_MARGIN, w = start;
+            for (size_t k = start + skip; k < et->count; k++) {
+                et->audio[w] = et->audio[k];
+                et->speaking[w] = et->speaking[k];
+                w++;
+            }
+            et->count = w;
+        }
+    }
 
-    /* Convert this utterance to the output format once, here, rather
-     * than in echotalk_read -- doing it there would resample the
-     * already-resampled tail on every call and shrink the audio each
-     * time. The clock multiplier is applied by declaring a different
-     * source rate for the same samples: the chip expresses everything
-     * in sample counts, so speed and pitch move together exactly as
-     * over/underclocking the real chip would. */
+    /* Convert to the output format now, while this utterance is the
+     * tail of the buffer. The clock multiplier is applied by declaring a
+     * different source rate for the same samples: the chip expresses
+     * everything in sample counts, so speed and pitch move together
+     * exactly as over/underclocking the real chip would. The resampler
+     * carries its phase across utterances so the boundaries do not
+     * click. */
     unsigned native = (unsigned)(CHIP_HZ * et->clock_mult + 0.5);
-    if (native != et->out_rate && et->count > utt_start) {
-        size_t in_n = et->count - utt_start, out_n = 0;
-        int16_t *rs = echotalk_resample(et->audio + utt_start, in_n,
-                                        native, et->out_rate, &out_n);
+    if (native != et->out_rate && et->count > start) {
+        size_t in_n = et->count - start, out_n = 0;
+        int16_t *rs = echotalk_resample_stream(et->audio + start, in_n,
+                                               native, et->out_rate,
+                                               &et->resamp_phase, &out_n);
         if (rs) {
-            size_t need_cap = utt_start + out_n;
+            size_t need_cap = start + out_n;
             if (need_cap > et->cap) {
                 int16_t *na = realloc(et->audio, need_cap * sizeof(int16_t));
                 uint8_t *ns = realloc(et->speaking, need_cap);
@@ -545,14 +509,13 @@ static int speak_run(echotalk *et, const char *text, size_t len) {
                 if (na && ns) et->cap = need_cap;
             }
             if (need_cap <= et->cap) {
-                memcpy(et->audio + utt_start, rs, out_n * sizeof(int16_t));
-                memset(et->speaking + utt_start, 1, out_n);
+                memcpy(et->audio + start, rs, out_n * sizeof(int16_t));
+                memset(et->speaking + start, 1, out_n);
                 et->count = need_cap;
             }
             free(rs);
         }
     }
-    return et->aborted ? -1 : 0;
 }
 
 /* --- Ctrl-D driver commands ----------------------------------------
@@ -595,6 +558,8 @@ static int drv_int(double v, int *out) {
     return 0;
 }
 
+static int record_index(echotalk *et, int index);
+
 /* Returns 0 if applied, -1 if the letter is unknown or the value is out
  * of range. A letter with no number restores that setting's default. */
 static int apply_drv_cmd(echotalk *et, char letter, int has_value, double value) {
@@ -614,66 +579,221 @@ static int apply_drv_cmd(echotalk *et, char letter, int has_value, double value)
         if (!has_value) return echotalk_set_raw(et, 0);
         if (drv_int(value, &n)) return -1;
         return echotalk_set_raw(et, n);
+    case 'I': case 'i':                       /* index mark            */
+        /* The one command with no default: an index without a number
+         * says nothing, so a bare I is a mistake rather than a request
+         * for index zero. */
+        if (!has_value || drv_int(value, &n)) return -1;
+        return record_index(et, n);
     default:
         return -1;
     }
+}
+
+/* Records an index mark at the current end of the output stream.
+ *
+ * Commands are applied only once everything before them has been
+ * synthesised, so et->count IS the position the mark belongs at -- no
+ * bookkeeping through trimming or resampling is needed, because both
+ * have already happened to every sample that precedes it. That is the
+ * main reason index marks are Ctrl-D commands rather than something
+ * that could sit in the middle of an utterance: a position inside one
+ * is not knowable until the utterance has been spoken, and by then it
+ * is too late to split it. */
+static int record_index(echotalk *et, int index) {
+    if (et->n_idx >= sizeof(et->idx) / sizeof(et->idx[0])) return -1;
+    et->idx[et->n_idx].index = index;
+    et->idx[et->n_idx].offset = et->count;
+    et->n_idx++;
+    return 0;
+}
+
+/* Applies the Ctrl-D command at pend_pos and steps over it. */
+static void apply_pending_command(echotalk *et) {
+    const char *text = et->pending;
+    size_t len = et->pend_len;
+
+    /* Whitespace may follow the introducer, because that is where a
+     * person writing "Ctrl-D 2F" naturally puts it. The number and
+     * letter are one token though, exactly as in Ctrl-E's "12P" --
+     * allowing a gap there would make "\x04 2 Fox" ambiguous between a
+     * command and text. */
+    size_t j = et->pend_pos + 1;
+    while (j < len && (text[j] == ' ' || text[j] == '\t')) j++;
+    double value = 0.0;
+    int has_value = parse_number(text, len, &j, &value);
+    char c = (j < len) ? text[j] : 0;
+
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+        if (apply_drv_cmd(et, c, has_value, value) != 0) et->cmd_errors++;
+        et->pend_pos = j + 1;
+    } else {
+        /* Swallow the introducer and any number that followed it.
+         * Leaving the digits behind would have the host speak fragments
+         * of its own control codes. */
+        et->cmd_errors++;
+        et->pend_pos = j;
+    }
+}
+
+/* True if pend_pos is on a command rather than on an escaped literal. */
+static int at_command(const echotalk *et) {
+    if (et->pend_pos >= et->pend_len) return 0;
+    if ((unsigned char)et->pending[et->pend_pos] != CTRL_D) return 0;
+    return !(et->pend_pos + 1 < et->pend_len &&
+             (unsigned char)et->pending[et->pend_pos + 1] == CTRL_D);
+}
+
+/* Applies any commands sitting at the cursor, then gathers the run of
+ * literal text that follows into `seg`, prepared unless raw mode is on.
+ * Returns 1 if there is a segment to speak, 0 if the pending text ran
+ * out. Reading the raw-mode flag here rather than earlier is what makes
+ * a mid-text Ctrl-D 1R apply to the text after it and not before. */
+static int gather_segment(echotalk *et) {
+    while (at_command(et)) apply_pending_command(et);
+    if (et->pend_pos >= et->pend_len) return 0;
+
+    size_t cap = et->pend_len - et->pend_pos + 1;
+    char *raw = malloc(cap);
+    if (!raw) return 0;
+
+    size_t rl = 0;
+    while (et->pend_pos < et->pend_len) {
+        unsigned char c = (unsigned char)et->pending[et->pend_pos];
+        if (c == CTRL_D) {
+            /* Doubled Ctrl-D is an escaped literal, not a command. This
+             * is what keeps raw mode reachable in both directions:
+             * Ctrl-D has to be honoured even in raw mode, or 1R would be
+             * a one-way door, so text that means a literal 0x04 needs a
+             * way to say so. */
+            if (et->pend_pos + 1 < et->pend_len &&
+                (unsigned char)et->pending[et->pend_pos + 1] == CTRL_D) {
+                raw[rl++] = (char)CTRL_D;
+                et->pend_pos += 2;
+                continue;
+            }
+            break;      /* a command, and it applies after this text */
+        }
+        raw[rl++] = (char)c;
+        et->pend_pos++;
+    }
+
+    size_t need = et->raw ? rl
+                          : echotalk_prep_text((const uint8_t *)raw, rl,
+                                               NULL, 0, NULL);
+    if (need + 1 > et->seg_cap) {
+        char *ns = realloc(et->seg, need + 1);
+        if (!ns) { free(raw); return 0; }
+        et->seg = ns;
+        et->seg_cap = need + 1;
+    }
+    if (et->raw) {
+        memcpy(et->seg, raw, rl);
+        et->seg[rl] = 0;
+    } else {
+        echotalk_prep_text((const uint8_t *)raw, rl, et->seg, need + 1, NULL);
+    }
+    et->seg_len = need;
+    et->seg_pos = 0;
+    free(raw);
+    return 1;
+}
+
+/* Speaks the next utterance's worth of pending work, and no more.
+ * Returns 1 if it produced audio, 0 if there is nothing left.
+ *
+ * Chunking happens one chunk at a time here rather than all at once,
+ * which is both what streaming needs and what removes an old ceiling:
+ * echotalk_chunk_text() stops when the caller's array fills and reports
+ * nothing about the text it never reached, so asking it for a single
+ * chunk per call and advancing past it cannot silently drop a tail. */
+static int pump_one(echotalk *et) {
+    for (;;) {
+        while (et->seg_pos < et->seg_len) {
+            const char *line = et->seg + et->seg_pos;
+            size_t avail = et->seg_len - et->seg_pos;
+            size_t line_len = 0;
+            while (line_len < avail && line[line_len] != '\r') line_len++;
+            size_t skip_cr = (line_len < avail) ? 1 : 0;
+
+            if (line_len == 0) { et->seg_pos += skip_cr; continue; }
+
+            if (!et->chunk_size || line_len <= et->chunk_size) {
+                emit_utterance(et, line, line_len);
+                et->seg_pos += line_len + skip_cr;
+                return 1;
+            }
+
+            echotalk_chunk ch;
+            if (echotalk_chunk_text(line, line_len, et->chunk_size, &ch, 1) == 0) {
+                et->seg_pos += line_len + skip_cr;   /* only whitespace */
+                continue;
+            }
+            emit_utterance(et, line + ch.offset, ch.length);
+            et->seg_pos += ch.offset + ch.length;
+            return 1;
+        }
+
+        et->seg_len = et->seg_pos = 0;
+        if (!gather_segment(et)) return 0;
+    }
+}
+
+/* Once the queue is drained and nothing is outstanding, wind the buffer
+ * back to the start. Without this the audio buffer grows for the life of
+ * the instance, which matters for a screen reader that may run for days.
+ * Index events not yet collected are rebased rather than dropped. */
+static void recycle_buffer(echotalk *et) {
+    if (et->read_pos < et->count || et->pend_pos < et->pend_len ||
+        et->seg_pos < et->seg_len)
+        return;
+    et->count = et->read_pos = 0;
+    et->pend_len = et->pend_pos = 0;
+    et->seg_len = et->seg_pos = 0;
+    if (et->idx_head >= et->n_idx) {
+        et->n_idx = et->idx_head = 0;
+    } else {
+        size_t keep = et->n_idx - et->idx_head;
+        memmove(et->idx, et->idx + et->idx_head, keep * sizeof(et->idx[0]));
+        for (size_t i = 0; i < keep; i++) et->idx[i].offset = 0;
+        et->n_idx = keep;
+        et->idx_head = 0;
+    }
+    et->resamp_phase = 0.0;
 }
 
 int echotalk_speak(echotalk *et, const char *text) {
     if (!et || !text) return -1;
     size_t len = strlen(text);
 
-    apply_settings(et);
+    /* Drop what has already been read, so a long session does not grow
+     * the buffer without bound. */
+    recycle_buffer(et);
 
-    /* A segment can only ever be shorter than the input it came from. */
-    char *seg = malloc(len + 1);
-    if (!seg) return -1;
-    size_t seglen = 0, i = 0;
-    int rc = 0;
-
-    while (i < len) {
-        if ((unsigned char)text[i] != CTRL_D) { seg[seglen++] = text[i++]; continue; }
-
-        /* Doubled Ctrl-D is an escaped literal, not a command. This is
-         * what keeps raw mode reachable in both directions: Ctrl-D has
-         * to be honoured even in raw mode, or 1R would be a one-way
-         * door, so text that means a literal 0x04 needs a way to say
-         * so. */
-        if (i + 1 < len && (unsigned char)text[i + 1] == CTRL_D) {
-            seg[seglen++] = (char)CTRL_D;
-            i += 2;
-            continue;
-        }
-
-        /* Flush what is buffered before the setting changes under it. */
-        if (seglen && speak_run(et, seg, seglen) != 0) rc = -1;
-        seglen = 0;
-
-        /* Whitespace may follow the introducer, because that is where a
-         * person writing "Ctrl-D 2F" naturally puts it. The number and
-         * letter are one token though, exactly as in Ctrl-E's "12P" --
-         * allowing a gap there would make "\x04 2 Fox" ambiguous
-         * between a command and text. */
-        size_t j = i + 1;
-        while (j < len && (text[j] == ' ' || text[j] == '\t')) j++;
-        double value = 0.0;
-        int has_value = parse_number(text, len, &j, &value);
-        char c = (j < len) ? text[j] : 0;
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
-            if (apply_drv_cmd(et, c, has_value, value) != 0) et->cmd_errors++;
-            i = j + 1;
-        } else {
-            /* Swallow the introducer and any number that followed it.
-             * Leaving the digits behind would have the host speak
-             * fragments of its own control codes. */
-            et->cmd_errors++;
-            i = j;
-        }
+    if (et->pend_len + len + 1 > et->pend_cap) {
+        size_t ncap = et->pend_len + len + 1;
+        char *np = realloc(et->pending, ncap);
+        if (!np) return -1;
+        et->pending = np;
+        et->pend_cap = ncap;
     }
-    if (seglen && speak_run(et, seg, seglen) != 0) rc = -1;
-    free(seg);
+    memcpy(et->pending + et->pend_len, text, len);
+    et->pend_len += len;
+    et->pending[et->pend_len] = 0;
 
-    return (rc || et->aborted) ? -1 : 0;
+    return et->aborted ? -1 : 0;
+}
+
+size_t echotalk_pending(const echotalk *et) {
+    if (!et) return 0;
+    return (et->pend_len - et->pend_pos) + (et->seg_len - et->seg_pos);
+}
+
+size_t echotalk_synthesize(echotalk *et, size_t min_samples) {
+    if (!et) return 0;
+    while (et->count - et->read_pos < min_samples && pump_one(et))
+        ;
+    return et->count - et->read_pos;
 }
 
 size_t echotalk_available(const echotalk *et) {
@@ -681,14 +801,18 @@ size_t echotalk_available(const echotalk *et) {
 }
 
 size_t echotalk_read(echotalk *et, int16_t *out, size_t frames) {
+    if (!et || !out || !frames) return 0;
+
+    /* Synthesise on demand. This is what makes the library stream: the
+     * caller hears the first chunk without waiting for the last, and at
+     * roughly 136x real time there is ample headroom to do it inline
+     * from an audio callback. A host that would rather not can call
+     * echotalk_synthesize() from a thread of its own. */
+    while (et->read_pos >= et->count && pump_one(et))
+        ;
+
     size_t have = et->count - et->read_pos;
-    if (!have || !frames) return 0;
-    {
-        size_t n = have < frames ? have : frames;
-        memcpy(out, et->audio + et->read_pos, n * sizeof(int16_t));
-        et->read_pos += n;
-        return n;
-    }
+    if (!have) { recycle_buffer(et); return 0; }
 
     size_t n = have < frames ? have : frames;
     memcpy(out, et->audio + et->read_pos, n * sizeof(int16_t));
@@ -696,6 +820,27 @@ size_t echotalk_read(echotalk *et, int16_t *out, size_t frames) {
     return n;
 }
 
+int echotalk_next_index(echotalk *et, int *index) {
+    if (!et || et->idx_head >= et->n_idx) return 0;
+    if (et->idx[et->idx_head].offset > et->read_pos) return 0;
+    if (index) *index = et->idx[et->idx_head].index;
+    et->idx_head++;
+    return 1;
+}
+
 void echotalk_stop(echotalk *et) {
+    if (!et) return;
+    /* Everything, not just the queued audio: text that has not been
+     * synthesised yet would otherwise resume on the next read, and index
+     * events left behind would fire against audio nobody is going to
+     * hear. A screen reader calls this because the user moved on.
+     *
+     * Textalker's own state needs no attention. Synthesis runs to the
+     * end of an utterance before returning, so there is never anything
+     * in flight to interrupt. */
     et->count = et->read_pos = 0;
+    et->pend_len = et->pend_pos = 0;
+    et->seg_len = et->seg_pos = 0;
+    et->n_idx = et->idx_head = 0;
+    et->resamp_phase = 0.0;
 }

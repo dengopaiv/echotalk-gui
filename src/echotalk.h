@@ -59,7 +59,7 @@ typedef struct echotalk echotalk;
  * runtime -- which is what a screen reader does -- has no compile-time
  * check available, so it should call echotalk_abi_version() and compare
  * against this before anything else. */
-#define ECHOTALK_ABI_VERSION 1
+#define ECHOTALK_ABI_VERSION 2
 ECHOTALK_API unsigned echotalk_abi_version(void);
 
 /* --- lifecycle --- */
@@ -158,12 +158,23 @@ ECHOTALK_API int echotalk_set_repeat_filter(echotalk *et, int threshold);
 
 /* --- speaking --- */
 
-/* Synthesises `text` in full and queues the audio for reading.
+/* Queues `text` to be spoken. Returns 0 on success.
+ *
  * Accepts UTF-8 or legacy single-byte text, detected per character, and
  * reduces it to the 7-bit ASCII Textalker understands. Long lines are
  * split at clause then word boundaries so Textalker's own buffer never
  * decides where to break, which it would otherwise sometimes do
- * mid-word. Returns 0 on success.
+ * mid-word.
+ *
+ * THIS DOES NOT SYNTHESISE. It returns as soon as the text is copied;
+ * echotalk_read() synthesises one utterance at a time, on demand, so
+ * the first chunk can be playing while the rest is still being made.
+ * echotalk_available() is therefore 0 immediately after this call --
+ * use echotalk_pending() to ask whether there is work outstanding, and
+ * treat a 0 return from echotalk_read() as the end of speech.
+ *
+ * Calling it again before the queue drains appends; it does not
+ * interrupt. Use echotalk_stop() to abandon what is queued.
  *
  * --- Ctrl-D driver commands ---
  *
@@ -175,6 +186,7 @@ ECHOTALK_API int echotalk_set_repeat_filter(echotalk *et, int threshold);
  *   \x04 0.75C  clock multiplier      \x04C   clock back to 1.0
  *   \x04 0B     chunking off          \x04 80B  chunk at 80 characters
  *   \x04 1R     raw text on           \x04 0R   raw text off
+ *   \x04 7I     index mark 7          (no default; a bare I is an error)
  *   \x04\x04    one literal 0x04 byte, spoken rather than obeyed
  *
  * The namespaces are disjoint on purpose: Ctrl-E addresses the 1985
@@ -208,14 +220,65 @@ ECHOTALK_API unsigned echotalk_command_errors(const echotalk *et);
 ECHOTALK_API void echotalk_clear_command_errors(echotalk *et);
 
 /* Copies up to `frames` samples of 16-bit mono PCM into `out` and
- * returns how many were written; 0 means the queue is drained. */
+ * returns how many were written. Synthesises on demand when the queue
+ * runs dry, so a 0 return means the utterance is finished and drained,
+ * not merely that nothing is ready yet.
+ *
+ * Synthesis measures around 136x real time, so calling this straight
+ * from an audio callback has ample headroom. */
 ECHOTALK_API size_t echotalk_read(echotalk *et, int16_t *out, size_t frames);
 
-/* Samples still waiting to be read. */
+/* Samples already synthesised and waiting to be read. This is NOT how
+ * much speech is left -- see echotalk_pending(). */
 ECHOTALK_API size_t echotalk_available(const echotalk *et);
 
-/* Discards queued audio. Textalker's own state is untouched, so
- * subsequent speech sounds the same as if this had not been called. */
+/* Bytes of queued text not yet turned into audio. Zero together with a
+ * zero echotalk_available() means everything has been spoken and read. */
+ECHOTALK_API size_t echotalk_pending(const echotalk *et);
+
+/* Synthesises until at least `min_samples` are queued, or until the
+ * text runs out, and returns echotalk_available(). For a host that
+ * would rather run synthesis on its own thread than inside its audio
+ * callback: call this from that thread, echotalk_read() from the other,
+ * and serialise the two -- the library is not thread-safe. */
+ECHOTALK_API size_t echotalk_synthesize(echotalk *et, size_t min_samples);
+
+/* --- index events ---
+ *
+ * An index mark is placed with the Ctrl-D I command, e.g. "\x04 7I".
+ * Each becomes an event that is ready once echotalk_read() has handed
+ * out the audio preceding it, which is what lets a host report progress
+ * through an utterance.
+ *
+ * These are exact rather than estimated: the mark's position is the
+ * sample count at the moment the text before it finished synthesising,
+ * and we generated every one of those samples.
+ *
+ * The cost is that an index mark ENDS THE CURRENT UTTERANCE, like every
+ * other Ctrl-D command -- a position inside an utterance is not
+ * knowable until it has been spoken, by which time it is too late to
+ * split. Marking at clause or sentence granularity is therefore free,
+ * since the chunker breaks there anyway; marking every word will make
+ * Textalker's prosody noticeably choppier. */
+
+/* Pops the oldest index event whose audio has been read. Returns 1 and
+ * writes the index into *index, or 0 if none is ready.
+ *
+ * Drain it in a loop after each echotalk_read(), INCLUDING the one that
+ * returns 0: a mark at the very end of the text only becomes ready on
+ * that last call, and an end-of-speech marker is exactly what a host is
+ * most likely to put there. */
+ECHOTALK_API int echotalk_next_index(echotalk *et, int *index);
+
+/* Abandons everything: queued audio, text not yet synthesised, and any
+ * index events still outstanding, which would otherwise fire against
+ * audio nobody is going to hear. This is what a screen reader calls
+ * when the user moves on.
+ *
+ * Textalker's own state is untouched and needs no attention, because
+ * synthesis always runs to the end of an utterance before returning --
+ * there is never anything in flight to interrupt. Subsequent speech
+ * sounds the same as if this had not been called. */
 ECHOTALK_API void echotalk_stop(echotalk *et);
 
 #ifdef __cplusplus
