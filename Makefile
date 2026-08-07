@@ -6,7 +6,19 @@
 #   make win64    -- static 64-bit Windows build.
 #   make win32    -- static 32-bit Windows build.
 #   make windows  -- both win64 and win32.
+#   make test     -- pure-logic unit tests, no ROMs needed.
 #   make clean
+#
+# Shared library, which is what a host like NVDA loads:
+#   make win64-dll / win32-dll / dll  -- echotalk.dll plus its import
+#                     library, self-contained, no MinGW runtime.
+#   make so       -- Linux/macOS libechotalk.so. UNTESTED: the machine
+#                     this was developed on is Windows.
+#   make test-dll -- load the 64-bit DLL from Python via ctypes, as a
+#                     screen reader would, and check the whole surface.
+#   make test-dll-load -- the same checks from C via GetProcAddress, for
+#                     both DLLs. This is how the 32-bit one gets tested
+#                     at all when the only Python present is 64-bit.
 #
 # --- Windows builds: which environment to run this from ---
 #
@@ -74,6 +86,7 @@ SOURCES_TEST_PREP = tools/test_text_prep.c src/text_prep.c
 SOURCES_TEST_CHUNKER = tools/test_chunker.c src/chunker.c
 
 CC_NATIVE ?= gcc
+PYTHON ?= python
 
 # --- Compiler selection ---
 #
@@ -113,7 +126,8 @@ endif
 
 BUILD_DIR = build
 
-.PHONY: all native win64 win32 windows test clean check-mingw64 check-mingw32
+.PHONY: all native win64 win32 windows test clean check-mingw64 check-mingw32 \
+        win64-dll win32-dll dll so test-dll test-dll-load
 
 all: native
 
@@ -162,6 +176,67 @@ win32: check-mingw32
 	@echo "win32 build complete: $(BUILD_DIR)/win32/"
 
 windows: win64 win32
+
+# --- Shared library ---
+#
+# The DLL is what a host like NVDA actually loads, so it must not drag
+# in a runtime the host does not have: -static pulls libgcc and the
+# MinGW support DLLs in, leaving only KERNEL32 and the C runtime the
+# target subsystem implies (UCRT for win64, MSVCRT for win32). Check
+# with `objdump -p echotalk.dll | grep 'DLL Name'` after changing this.
+#
+# --out-implib produces the import library a C or C++ consumer links
+# against; a host loading it dynamically (ctypes, LoadLibrary) does not
+# need it, but its absence is the kind of thing that is only noticed
+# much later.
+DLL_FLAGS = -shared -static -DECHOTALK_BUILD_DLL
+
+win64-dll: check-mingw64
+	mkdir -p $(BUILD_DIR)/win64
+	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) $(DLL_FLAGS) \
+	  -o $(BUILD_DIR)/win64/echotalk.dll $(LIB_SOURCES) \
+	  -Wl,--out-implib,$(BUILD_DIR)/win64/libechotalk.dll.a
+	@echo "win64 DLL: $(BUILD_DIR)/win64/echotalk.dll"
+
+win32-dll: check-mingw32
+	mkdir -p $(BUILD_DIR)/win32
+	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) $(DLL_FLAGS) \
+	  -o $(BUILD_DIR)/win32/echotalk.dll $(LIB_SOURCES) \
+	  -Wl,--out-implib,$(BUILD_DIR)/win32/libechotalk.dll.a
+	@echo "win32 DLL: $(BUILD_DIR)/win32/echotalk.dll"
+
+dll: win64-dll win32-dll
+
+# Linux/macOS shared object. Untested on the Windows box this was
+# developed on -- the header's visibility attribute is in place and the
+# sources are portable C, but nobody has run it.
+so:
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -fvisibility=hidden -fPIC -shared \
+	  -DECHOTALK_BUILD_DLL \
+	  -o $(BUILD_DIR)/native/libechotalk.so $(LIB_SOURCES)
+	@echo "shared object: $(BUILD_DIR)/native/libechotalk.so"
+
+# Loads the DLL through ctypes exactly as a screen reader would and
+# checks the whole exported surface. Needs a Python whose bitness
+# matches the DLL, and the ROMs.
+test-dll: win64-dll
+	$(PYTHON) tools/test_dll.py $(BUILD_DIR)/win64/echotalk.dll \
+	  roms/textalker.ram.bin roms/textalker.obj.bin
+
+# The same checks from C, resolving every export through GetProcAddress
+# rather than linking. This is how the 32-bit DLL gets verified at all
+# on a machine whose only Python is 64-bit -- a bitness mismatch is
+# refused at load time, so ctypes cannot reach it.
+test-dll-load: win64-dll win32-dll
+	PATH="$(WIN64_PATH)" $(CC_WIN64) $(CFLAGS_COMMON) -o \
+	  $(BUILD_DIR)/win64/test_dll_load.exe tools/test_dll_load.c
+	PATH="$(WIN32_PATH)" $(CC_WIN32) $(CFLAGS_COMMON) -o \
+	  $(BUILD_DIR)/win32/test_dll_load.exe tools/test_dll_load.c
+	$(BUILD_DIR)/win64/test_dll_load.exe $(BUILD_DIR)/win64/echotalk.dll \
+	  roms/textalker.ram.bin roms/textalker.obj.bin
+	$(BUILD_DIR)/win32/test_dll_load.exe $(BUILD_DIR)/win32/echotalk.dll \
+	  roms/textalker.ram.bin roms/textalker.obj.bin
 
 # Both checks verify the selected compiler EXISTS and actually targets
 # the architecture the target name promises, by asking it directly via

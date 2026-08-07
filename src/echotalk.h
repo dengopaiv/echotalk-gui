@@ -23,24 +23,58 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* --- linkage ---
+ *
+ * Building the shared library defines ECHOTALK_BUILD_DLL; a C or C++
+ * consumer that links against the import library defines ECHOTALK_DLL.
+ * Neither is needed to compile the sources straight into a program,
+ * which is what tools/say.c does, and it is the case that has to keep
+ * working with no defines at all.
+ *
+ * Everything is plain cdecl. On x86-64 there is only one convention; on
+ * 32-bit the exported names are undecorated, so ctypes.CDLL finds them
+ * by their plain C names on both. */
+#if defined(_WIN32)
+#  if defined(ECHOTALK_BUILD_DLL)
+#    define ECHOTALK_API __declspec(dllexport)
+#  elif defined(ECHOTALK_DLL)
+#    define ECHOTALK_API __declspec(dllimport)
+#  else
+#    define ECHOTALK_API
+#  endif
+#elif defined(ECHOTALK_BUILD_DLL)
+#  define ECHOTALK_API __attribute__((visibility("default")))
+#else
+#  define ECHOTALK_API
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct echotalk echotalk;
 
+/* ABI version of this header, bumped when the exported surface changes
+ * in a way a caller could notice. A host that loads the library at
+ * runtime -- which is what a screen reader does -- has no compile-time
+ * check available, so it should call echotalk_abi_version() and compare
+ * against this before anything else. */
+#define ECHOTALK_ABI_VERSION 1
+ECHOTALK_API unsigned echotalk_abi_version(void);
+
 /* --- lifecycle --- */
 
 /* Loads the images and boots Textalker. On failure returns NULL and,
  * if errbuf is non-NULL, writes a human-readable reason into it. */
-echotalk *echotalk_create(const char *loader_path, const char *obj_path,
-                          char *errbuf, size_t errbuf_len);
-void echotalk_destroy(echotalk *et);
+ECHOTALK_API echotalk *echotalk_create(const char *loader_path,
+                                       const char *obj_path,
+                                       char *errbuf, size_t errbuf_len);
+ECHOTALK_API void echotalk_destroy(echotalk *et);
 
 /* Version banner read out of the loader, e.g. "3.1.3" or "1.3", or
  * "unknown" if it could not be parsed. Display only -- nothing in this
  * library keys behaviour off it. */
-const char *echotalk_version(const echotalk *et);
+ECHOTALK_API const char *echotalk_version(const echotalk *et);
 
 /* --- settings ---
  *
@@ -59,12 +93,12 @@ const char *echotalk_version(const echotalk *et);
 /* Output sample rate in Hz. The chip is native 8000; anything else is
  * resampled by linear interpolation with no anti-aliasing, which keeps
  * the original grit rather than smoothing it. 0 selects native. */
-int echotalk_set_sample_rate(echotalk *et, unsigned hz);
+ECHOTALK_API int echotalk_set_sample_rate(echotalk *et, unsigned hz);
 
 /* Pretends the TMS5220 runs at a different clock. Changes speed and
  * pitch together, exactly as over/underclocking the real chip would.
  * 1.0 is the real Echo II. Range 0.25 to 4.0. */
-int echotalk_set_clock_multiplier(echotalk *et, double multiplier);
+ECHOTALK_API int echotalk_set_clock_multiplier(echotalk *et, double multiplier);
 
 /* TMS5220 frame rate, 0-3: 8, 6, 4 or 2 interpolation periods per
  * frame, measuring roughly 1.00x, 1.31x, 1.89x and 3.40x speed with
@@ -72,22 +106,22 @@ int echotalk_set_clock_multiplier(echotalk *et, double multiplier);
  * an emulator capability, since the card carries a plain TMS5220 whose
  * SET RATE command is a no-op. Higher rates skip the gentler early
  * interpolation steps, so timbre changes as well as speed. */
-int echotalk_set_frame_rate(echotalk *et, int rate);
+ECHOTALK_API int echotalk_set_frame_rate(echotalk *et, int rate);
 
 /* Textalker's own two speech rates: 0 expanded (default), 1 compressed.
  * It implements these by skipping phoneme segments rather than by
  * changing playback rate, so this is a different effect from either
  * control above and composes with both. */
-int echotalk_set_compressed(echotalk *et, int compressed);
+ECHOTALK_API int echotalk_set_compressed(echotalk *et, int compressed);
 
 /* Textalker pitch 0-63 (default 24) and volume 0-15 (default 12). */
-int echotalk_set_pitch(echotalk *et, int pitch);
-int echotalk_set_volume(echotalk *et, int volume);
+ECHOTALK_API int echotalk_set_pitch(echotalk *et, int pitch);
+ECHOTALK_API int echotalk_set_volume(echotalk *et, int volume);
 
 /* Pause Textalker inserts between words, 0-15 (default 0).
  * Textalker 1.3 does not implement this command at all and silently
  * discards it, so it has no effect there. */
-int echotalk_set_word_delay(echotalk *et, int delay);
+ECHOTALK_API int echotalk_set_word_delay(echotalk *et, int delay);
 
 /* Longest run of text handed to Textalker between CRs, in characters.
  *
@@ -102,15 +136,15 @@ int echotalk_set_word_delay(echotalk *et, int delay);
  * removes the only thing standing between long text and Textalker's
  * uncharacterised flush behaviour. Supported for experimentation, but
  * do not use it for anything that has to be right. */
-int echotalk_set_chunk_size(echotalk *et, unsigned chars);
-unsigned echotalk_chunk_size(const echotalk *et);
+ECHOTALK_API int echotalk_set_chunk_size(echotalk *et, unsigned chars);
+ECHOTALK_API unsigned echotalk_chunk_size(const echotalk *et);
 
 /* Raw mode: 0 (default) prepares text as echotalk_speak() describes,
  * 1 passes bytes to Textalker untouched. Raw mode is how you send
  * Ctrl-E command sequences that contain bytes text preparation would
  * otherwise fold away; note that ordinary Ctrl-E commands survive
  * preparation already and do not need it. */
-int echotalk_set_raw(echotalk *et, int raw);
+ECHOTALK_API int echotalk_set_raw(echotalk *et, int raw);
 
 /* Threshold for Textalker's repeat-character filter, 0-99.
  *
@@ -120,7 +154,7 @@ int echotalk_set_raw(echotalk *et, int raw);
  * default here is 99, high enough that it never triggers, which is
  * almost certainly what a screen reader wants. Lower it to get
  * Textalker's original behaviour back. */
-int echotalk_set_repeat_filter(echotalk *et, int threshold);
+ECHOTALK_API int echotalk_set_repeat_filter(echotalk *et, int threshold);
 
 /* --- speaking --- */
 
@@ -165,24 +199,24 @@ int echotalk_set_repeat_filter(echotalk *et, int threshold);
  * A malformed or unknown command is swallowed, never spoken -- a screen
  * reader reading its own control codes aloud would be worse than the
  * command being ignored -- and counted, see echotalk_command_errors(). */
-int echotalk_speak(echotalk *et, const char *text);
+ECHOTALK_API int echotalk_speak(echotalk *et, const char *text);
 
 /* Number of malformed or unknown Ctrl-D commands seen since the last
  * call to echotalk_clear_command_errors(). Since bad commands are
  * silently dropped, this is the only way a host can notice a typo. */
-unsigned echotalk_command_errors(const echotalk *et);
-void echotalk_clear_command_errors(echotalk *et);
+ECHOTALK_API unsigned echotalk_command_errors(const echotalk *et);
+ECHOTALK_API void echotalk_clear_command_errors(echotalk *et);
 
 /* Copies up to `frames` samples of 16-bit mono PCM into `out` and
  * returns how many were written; 0 means the queue is drained. */
-size_t echotalk_read(echotalk *et, int16_t *out, size_t frames);
+ECHOTALK_API size_t echotalk_read(echotalk *et, int16_t *out, size_t frames);
 
 /* Samples still waiting to be read. */
-size_t echotalk_available(const echotalk *et);
+ECHOTALK_API size_t echotalk_available(const echotalk *et);
 
 /* Discards queued audio. Textalker's own state is untouched, so
  * subsequent speech sounds the same as if this had not been called. */
-void echotalk_stop(echotalk *et);
+ECHOTALK_API void echotalk_stop(echotalk *et);
 
 #ifdef __cplusplus
 }

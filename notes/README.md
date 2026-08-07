@@ -49,6 +49,9 @@ authoritative**, not the numbers here.
 - `tms5220_port_and_audio_pipeline.md` — how the TMS5220 port was made.
 - `mingw_build_system.md` — build targets, runtimes, and the
   wrong-architecture trap the Makefile now guards against.
+- `dll_packaging.md` — the export surface, calling convention, runtime
+  dependencies and ABI version, plus why there are two DLL test
+  programs rather than one.
 
 ## Superseded, kept for the reasoning only
 

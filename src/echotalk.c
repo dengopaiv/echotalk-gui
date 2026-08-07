@@ -301,6 +301,8 @@ void echotalk_destroy(echotalk *et) {
     free(et->audio); free(et->speaking); free(et);
 }
 
+unsigned echotalk_abi_version(void) { return ECHOTALK_ABI_VERSION; }
+
 const char *echotalk_version(const echotalk *et) { return et->version; }
 
 int echotalk_set_sample_rate(echotalk *et, unsigned hz) {

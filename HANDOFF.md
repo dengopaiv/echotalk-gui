@@ -322,17 +322,49 @@ Two things worth keeping from that investigation:
   it aside because it blocks on a keypress, and that is still true; it
   simply is not a problem this bug required solving.
 
+## The DLL
+
+`make win64-dll` / `win32-dll` / `dll` build `echotalk.dll` plus its
+import library. `notes/dll_packaging.md`
+
+21 exports, undecorated on both architectures, plain cdecl, so
+`ctypes.CDLL` finds them by plain C name. `-static` inside the shared
+link leaves only KERNEL32 plus the C runtime the subsystem implies
+(UCRT for win64, MSVCRT for win32) -- no MinGW runtime to ship. Check
+with `objdump -p echotalk.dll | grep 'DLL Name'` after touching the link
+line; the failure mode is a DLL that works here and not on a user's
+machine.
+
+`echotalk_abi_version()` returns 1. A host loading at runtime has no
+compile-time check available, so bump it whenever the surface changes in
+a way a caller could notice.
+
+Two test programs, and both are needed:
+
+```
+make test-dll        # ctypes, as NVDA would, 64-bit only
+make test-dll-load   # GetProcAddress from C, BOTH architectures
+```
+
+The second exists because the 32-bit DLL cannot be reached from Python
+here -- the only interpreter on this machine is 64-bit and Windows
+refuses a bitness mismatch at load time. Both pass, and produce
+identical sample counts across 32- and 64-bit.
+
+`make so` exists for Linux/macOS but is **untested** -- it compiles, but
+nobody has loaded a real `.so`.
+
 ## What is left
 
-1. **DLL export surface** and `make win64-dll` / `win32-dll` targets.
-   Small, and it makes the library testable from Python, which is where
-   the real NVDA integration questions will surface. Do this first.
-2. **Streaming.** `echotalk_speak()` synthesises the whole utterance
+1. **Streaming.** `echotalk_speak()` synthesises the whole utterance
    before `echotalk_read()` returns anything. NVDA wants audio as it is
    generated -- the look-ahead design is in
    `notes/buffer_chunking_and_indexing.md`.
-3. **Index events** for NVDA's `IndexReached`, same note.
-4. Smaller: re-measure the baseline table with `say` if the library is
+2. **Index events** for NVDA's `IndexReached`, same note. This one will
+   add entry points, so it will need an ABI version bump; streaming
+   probably will not, since it changes when `echotalk_read` returns data
+   rather than its signature.
+3. Smaller: re-measure the baseline table with `say` if the library is
    to be the reference; the unmapped-character policy in `text_prep` is
    a UX decision worth revisiting; continuous frame-rate control beyond
    the four steps would need the accumulator described in

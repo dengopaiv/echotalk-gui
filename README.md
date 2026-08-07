@@ -11,8 +11,8 @@ reimplemented or approximated.
 
 ## Status
 
-**The emulation is complete and validated, and the library works. What
-is left is packaging it as a DLL and making it stream.**
+**The emulation is complete and validated, the library works, and it
+builds as a DLL. What is left is making it stream.**
 
 - Speech matches a real-hardware capture exactly in amplitude
   (-12127/+26833 for "HI") and matches MAME frame-for-frame and
@@ -41,9 +41,13 @@ command changes pitch alone, the TMS5220 frame rate changes speed alone,
 the clock multiplier changes both for the sped-up-tape character, and
 the output sample rate changes neither.
 
-What remains is the DLL export surface, streaming audio out (speech is
-currently synthesised in full before it can be read), and NVDA
-index-event reporting.
+It also builds as a self-contained `echotalk.dll` — 21 undecorated cdecl
+exports, no MinGW runtime to ship, loadable straight from Python with
+`ctypes` the way NVDA will. Both a Python and a C test drive it through
+that boundary; the C one exists so the 32-bit build gets tested too.
+
+What remains is streaming audio out (speech is currently synthesised in
+full before it can be read) and NVDA index-event reporting.
 
 **Start with [HANDOFF.md](HANDOFF.md)** — it has the current state,
 build and run instructions, reference baselines, and the facts worth not
@@ -56,6 +60,8 @@ Build with MSYS2 (**not** the Cygwin `gcc` that may be on PATH):
 ```
 make native
 make test          # pure-logic unit tests, no ROMs needed
+make dll           # echotalk.dll, 32- and 64-bit
+make test-dll      # load it from Python, as NVDA would
 ```
 
 Then, given a Textalker loader and OBJ image, speak through the library:
