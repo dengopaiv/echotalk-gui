@@ -492,9 +492,45 @@ mark at the end of the text never fires. Like every Ctrl-D command they
 end the current utterance, so clause or sentence granularity is free but
 marking every word will make the prosody choppy.
 
+## The NVDA add-on
+
+`nvda-addon/` holds the synth driver. `nvda-addon/README.md` has the
+build and packaging steps; the short version is `make dll`, copy the two
+DLLs and your Textalker images into `synthDrivers/echotalk/`, then
+`./build_addon.sh`.
+
+Exposed as settings: voice (one per Textalker image pair found), rate,
+pitch, volume, word delay, repeat filter, chip clock, output sample rate,
+monotone, compressed. Rate drives the continuous speed control; **the
+chip's four-step frame rate is deliberately not exposed**, since the
+continuous one sounds better.
+
+Points worth not re-deriving:
+
+- **Voices are discovered, not configured.** Any `<stem>.ram.bin` +
+  `<stem>.obj.bin` pair beside the driver becomes a voice, labelled from
+  the banner read by booting it briefly. Images nobody anticipated still
+  appear correctly named.
+- **Text is sanitised in the driver**, not the library: Ctrl-D, Ctrl-E and
+  Ctrl-V are replaced with a space, because the pipeline would otherwise
+  obey them and a document containing one would silently change the
+  voice. Replaced rather than deleted, so the rest of the line is still
+  spoken.
+- **Sliders are logarithmic for rate and chip clock** -- 50% is 1.0x and
+  every 25% doubles. Linear would put normal speed at 20% and waste the
+  travel. Defaults are pinned to the Echo's own values (pitch 24, volume
+  12), not NVDA's 50%: `defaultVal` on a DriverSetting is settable.
+- **`tools/test_nvda_driver.py` runs the driver without NVDA**, by stubbing
+  the modules it imports -- including the `_get_x`/`_set_x` to property
+  metaclass, which the driver depends on. It catches everything except
+  how the settings look in NVDA's own dialogs.
+
 ## What is left
 
-1. Smaller: re-measure the baseline table with `say` if the library is
+1. Try the add-on in real NVDA. Everything below that line is checked
+   here, but nothing has been through NVDA's settings dialogs, its
+   profile switching, or its real WavePlayer.
+2. Smaller: re-measure the baseline table with `say` if the library is
    to be the reference; the unmapped-character policy in `text_prep` is
    a UX decision worth revisiting; continuous frame-rate control beyond
    the four steps would need the accumulator described in

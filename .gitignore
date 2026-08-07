@@ -14,3 +14,9 @@ out/
 
 # Scratch space -- either of us may leave anything here
 tmp/
+
+# NVDA add-on staging: binaries and the proprietary Textalker images that
+# get copied in before packaging. The driver source itself IS tracked.
+nvda-addon/synthDrivers/echotalk/*.bin
+nvda-addon/synthDrivers/echotalk/THIRD_PARTY_LICENSES.txt
+nvda-addon/*.nvda-addon
