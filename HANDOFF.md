@@ -165,6 +165,26 @@ Plus `echotalk_set_pitch` (0-63), `_volume` (0-15), `_word_delay`
 (monotone), `_letter_mode`, `_punctuation`, `_chunk_size` (0 disables
 chunking) and `_raw`.
 
+### Continuous speech rate
+
+`echotalk_set_speed()`, 0.25 to 4.0, is the rate control to reach for --
+`notes/continuous_speed_accumulator.md`. The chip's own SET RATE gives
+four fixed steps, all at or above normal; this gives a smooth range
+either side of it with **pitch untouched**, measured: F0 stays at
+129.0 Hz from 0.5x to 3.0x, where the clock multiplier doubles it.
+
+It works by unlocking two things MAME's loop keeps together. Pitch comes
+from `m_pitch_count`, which advances once per output sample; speech rate
+comes from how fast the parameter state machine walks a frame. Running
+that machine at a rate other than one cycle per sample changes one and
+not the other. **1.0 is byte-exact by construction** -- at 1.0 the code
+takes exactly one cycle per sample in MAME's original order.
+
+The delivered ratio is monotonic but sub-linear: 2.0 gives 1.84x and 3.0
+gives 2.56x, matching the FIFO-starvation hypothesis in
+`library_plan_rate_and_pitch.md`. Uncalibrated on purpose; smooth and
+monotonic is what a rate slider needs.
+
 ### Settings are mirrored, and readable back
 
 Ctrl-E commands embedded in text still reach Textalker untouched, but
@@ -377,7 +397,7 @@ with `objdump -p echotalk.dll | grep 'DLL Name'` after touching the link
 line; the failure mode is a DLL that works here and not on a user's
 machine.
 
-`echotalk_abi_version()` returns **3**, over 39 exports. A host loading
+`echotalk_abi_version()` returns **4**, over 41 exports. A host loading
 at runtime has no compile-time check available, so bump it whenever the
 surface changes in a way a caller could notice.
 

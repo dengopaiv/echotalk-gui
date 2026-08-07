@@ -28,7 +28,7 @@ static void wav_write(const char *path, unsigned rate, const int16_t *pcm, size_
 
 int main(int argc, char **argv) {
     unsigned rate = 0;
-    double clock_mult = 1.0;
+    double clock_mult = 1.0, speed = 1.0;
     int frame_rate = 0, compressed = 0, pitch = -1, volume = -1;
     int word_delay = -1, repeat_filter = -1;
     int chunk = -1, raw = 0;
@@ -41,6 +41,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--repeat-filter") && i + 1 < argc) repeat_filter = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--rate") && i + 1 < argc) rate = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--clock") && i + 1 < argc) clock_mult = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--speed") && i + 1 < argc) speed = atof(argv[++i]);
         else if (!strcmp(argv[i], "--frame-rate") && i + 1 < argc) frame_rate = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--compressed")) compressed = 1;
         else if (!strcmp(argv[i], "--chunk") && i + 1 < argc) chunk = atoi(argv[++i]);
@@ -61,7 +62,10 @@ int main(int argc, char **argv) {
             "                     command line (omit the text argument)\n"
             "  --rate HZ          output sample rate (default 8000, native)\n"
             "  --clock MULT       TMS5220 clock multiplier, speed and pitch\n"
-            "  --frame-rate N     0-3, speed only (1.00x 1.31x 1.89x 3.40x)\n"
+            "  --speed MULT       0.25-4.0, speed only, pitch unchanged. This\n"
+            "                     is the one you probably want.\n"
+            "  --frame-rate N     0-3, the chip's own four fixed steps, speed\n"
+            "                     only (1.00x 1.31x 1.89x 3.40x)\n"
             "  --compressed       Textalker compressed speech\n"
             "  --pitch N          0-63 (default 24)\n"
             "  --volume N         0-15 (default 12)\n"
@@ -106,6 +110,7 @@ int main(int argc, char **argv) {
     if (rate && echotalk_set_sample_rate(et, rate)) fprintf(stderr, "bad --rate\n");
     if (echotalk_set_clock_multiplier(et, clock_mult)) fprintf(stderr, "bad --clock\n");
     if (echotalk_set_frame_rate(et, frame_rate)) fprintf(stderr, "bad --frame-rate\n");
+    if (echotalk_set_speed(et, speed)) fprintf(stderr, "bad --speed\n");
     echotalk_set_compressed(et, compressed);
     if (pitch >= 0 && echotalk_set_pitch(et, pitch)) fprintf(stderr, "bad --pitch\n");
     if (volume >= 0 && echotalk_set_volume(et, volume)) fprintf(stderr, "bad --volume\n");

@@ -35,12 +35,19 @@ void tms5220_reset(tms5220_state *tms, int variant)
      * field added to the struct later is still zeroed by default and
      * only deliberately-preserved ones survive. */
     uint8_t saved_rate = tms->m_configured_rate;
+    /* Continuous speech rate is a host setting like m_configured_rate,
+     * so it survives the RESET commands Textalker sends between
+     * segments. Zero would mean "stopped"; 1.0 is the off value, and is
+     * what a never-set instance must come up with. */
+    double saved_speech_rate = tms->m_speech_rate;
     void (*saved_readyq)(void *, int) = tms->m_readyq_handler;
     void *saved_readyq_ctx = tms->m_readyq_ctx;
 
     memset(tms, 0, sizeof(*tms));
 
     tms->m_configured_rate = saved_rate;
+    tms->m_speech_rate = (saved_speech_rate > 0.0) ? saved_speech_rate : 1.0;
+    tms->m_rate_acc = 0.0;
     tms->m_readyq_handler = saved_readyq;
     tms->m_readyq_ctx = saved_readyq_ctx;
 

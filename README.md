@@ -37,10 +37,12 @@ backend needs is in place.
   mirroring the shape of Textalker's own Ctrl-E ones — `\x04 2F` for
   frame rate, `\x04 0.75C` for the clock, and so on.
 
-Four controls cover rate and pitch independently — Textalker's pitch
-command changes pitch alone, the TMS5220 frame rate changes speed alone,
-the clock multiplier changes both for the sped-up-tape character, and
-the output sample rate changes neither.
+Five controls cover rate and pitch independently — Textalker's pitch
+command changes pitch alone, a continuous speed control changes speed
+alone (measured: F0 holds at 129 Hz from 0.5x to 3x), the TMS5220's own
+frame rate offers four fixed steps, the clock multiplier changes both
+for the sped-up-tape character, and the output sample rate changes
+neither.
 
 It also builds as a self-contained `echotalk.dll` — 24 undecorated cdecl
 exports, no MinGW runtime to ship, loadable straight from Python with

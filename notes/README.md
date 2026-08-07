@@ -42,6 +42,11 @@ authoritative**, not the numbers here.
   design behind the library's controls, and a worked example of a
   confident negative result that was wrong: frame-rate control was
   written off on a measurement that had silently not taken effect.
+  **Read the "MEASURED: it works" section before the later one that says
+  it does not** — the superseded conclusion sits after its own
+  correction, which is a trap top-to-bottom. Superseded again by
+  `continuous_speed_accumulator.md`, which built the accumulator this
+  note proposes.
 - `multi_version_support_design.md` — how one binary handles both
   Textalker versions, detected structurally rather than by hash.
 - `buffer_chunking_and_indexing.md` — chunking rationale, plus the
@@ -58,6 +63,10 @@ authoritative**, not the numbers here.
   events. Why the session-6 worker-thread design was dropped (synthesis
   runs at ~136x real time), and why index marks being Ctrl-D commands
   makes their offsets free.
+- `continuous_speed_accumulator.md` — continuous, pitch-preserving
+  speech rate, by unlocking the parameter state machine from the audio
+  path. Explains why 1.0 is byte-exact by construction, and measures
+  that pitch really does stay put.
 - `settings_mirroring.md` — watching Ctrl-E commands go past and
   updating the library's own variables, so a voice can be read back and
   carried to a fresh instance. Records that `nP` and `nF` are one

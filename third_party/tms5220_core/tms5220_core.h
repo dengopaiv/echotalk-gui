@@ -178,6 +178,26 @@ typedef struct tms5220_state {
      * segments. Zero unless set, giving MAME-identical behaviour. */
     uint8_t m_configured_rate;
 
+    /* --- continuous speech rate (NOT a real chip feature) ---
+     *
+     * The SET RATE command above offers four fixed steps, all at or
+     * above normal speed. A screen reader wants a smooth range either
+     * side of normal, so this scales how fast the parameter state
+     * machine walks a frame while the lattice filter keeps producing
+     * one sample per output sample.
+     *
+     * That split is what keeps pitch fixed: pitch comes from
+     * m_pitch_count, which advances once per OUTPUT sample, whereas
+     * speech rate comes from how many machine cycles that sample is
+     * worth. 2.0 runs the machine twice per sample (twice the speed,
+     * same pitch); 0.5 runs it every other sample.
+     *
+     * 1.0 is off, and is byte-exact: at 1.0 the machine takes exactly
+     * one cycle per sample in the original order, so the code path is
+     * indistinguishable from MAME's. Survives reset, like the above. */
+    double m_speech_rate;
+    double m_rate_acc;
+
     /* /READY handler, the equivalent of MAME's m_readyq_handler devcb.
      * Called on every change of the ready pin with the ACTIVE-LOW value
      * (0 = ready, 1 = not ready), matching what a2echoii.cpp's
@@ -216,6 +236,10 @@ int     tms5220_intq_r(tms5220_state *tms);
  * PCM. Call this regularly (e.g. once per output audio buffer) whether
  * or not the chip is currently talking -- it no-ops cheaply when idle. */
 void tms5220_process(tms5220_state *tms, int16_t *buffer, unsigned int size);
+
+/* Continuous speech rate; see m_speech_rate. 1.0 is off and byte-exact.
+ * Values outside 0.1 to 8.0 are ignored. Not a real chip feature. */
+void tms5220_set_speech_rate(tms5220_state *tms, double rate);
 
 /* Internal functions, exposed for the CLI/debug tooling; not part of
  * the stable API. */

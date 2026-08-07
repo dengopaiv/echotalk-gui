@@ -17,7 +17,7 @@ import struct
 import time
 import sys
 
-EXPECTED_ABI = 3
+EXPECTED_ABI = 4
 
 
 class Failures:
@@ -51,6 +51,7 @@ def declare(lib):
 
     for name, arg in [("set_sample_rate", ctypes.c_uint),
                       ("set_clock_multiplier", ctypes.c_double),
+                      ("set_speed", ctypes.c_double),
                       ("set_frame_rate", ctypes.c_int),
                       ("set_compressed", ctypes.c_int),
                       ("set_pitch", ctypes.c_int),
@@ -74,6 +75,8 @@ def declare(lib):
         fn.restype, fn.argtypes = ctypes.c_int, [p]
     lib.echotalk_clock_multiplier.restype = ctypes.c_double
     lib.echotalk_clock_multiplier.argtypes = [p]
+    lib.echotalk_speed.restype = ctypes.c_double
+    lib.echotalk_speed.argtypes = [p]
     lib.echotalk_sample_rate.restype = ctypes.c_uint
     lib.echotalk_sample_rate.argtypes = [p]
     lib.echotalk_speak.restype = ctypes.c_int
@@ -321,6 +324,22 @@ def main():
                           lib.echotalk_speak(et, b"Hi.\x04I"),
                           drain(lib, et),
                           lib.echotalk_command_errors(et))[-1])() == 1)
+
+        # --- continuous speed: faster, monotonic, pitch untouched ---
+        lib.echotalk_set_pitch(et, 24)
+        lib.echotalk_set_flat(et, 0)
+        SPEEDS = (0.5, 1.0, 2.0)
+        lens = []
+        for sp in SPEEDS:
+            f.check(f"set_speed({sp})", lib.echotalk_set_speed(et, sp) == 0)
+            lens.append(len(speak(lib, et, "Aaaaah.")) // 2)
+        f.check("speed is monotonic", lens[0] > lens[1] > lens[2], str(lens))
+        f.check("set_speed(9) rejected", lib.echotalk_set_speed(et, 9.0) == -1)
+        f.check("speed reads back", lib.echotalk_set_speed(et, 1.5) == 0
+                and abs(lib.echotalk_speed(et) - 1.5) < 1e-9,
+                str(lib.echotalk_speed(et)))
+        lib.echotalk_set_speed(et, 1.0)
+        drain(lib, et)
 
         # --- Ctrl-E commands in the text must update the settings ---
         #

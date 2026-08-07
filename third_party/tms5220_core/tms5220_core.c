@@ -426,10 +426,190 @@ int32_t tms5220_lattice_filter(tms5220_state *tms)
 		return tms->m_u[0];
 }
 
+/* --- continuous speech rate -----------------------------------------
+ *
+ * The two functions below are the loop body of tms5220_process(), split
+ * where the chip's own timing splits: parameter stepping and counter
+ * advance are the PARAMETER state machine, and everything between them
+ * (excitation, LFSR, lattice filter, pitch counter) is the AUDIO path
+ * that must keep running once per output sample.
+ *
+ * Splitting them is what allows the machine to run at a rate other than
+ * one cycle per sample, which changes speech rate while leaving pitch
+ * alone. They are called in the original order at rate 1.0, so nothing
+ * about the default path changes -- verified byte-exact against every
+ * reference file.
+ *
+ * MAME has no equivalent; do not expect to find these when diffing
+ * against third_party/tms5220/. The code inside them is unchanged.
+ */
+static void tms5220_step_parameters(tms5220_state *tms)
+{
+#ifdef TMS5220_PERFECT_INTERPOLATION_HACK
+	int i;
+#endif
+	if ((tms->m_IP == 0) && (tms->m_PC == 12) && (tms->m_subcycle == 1))
+	{
+		// HACK for regression testing, be sure to comment out before release!
+		//tms->m_RNG = 0x1234;
+		// end HACK
+
+		/* appropriately override the interp count if needed; this will be incremented after the frame parse! */
+		tms->m_IP = reload_table[tms->m_c_variant_rate&0x3];
+
+#ifdef TMS5220_PERFECT_INTERPOLATION_HACK
+		/* remember previous frame energy, pitch, and coefficients */
+		tms->m_old_frame_energy_idx = tms->m_new_frame_energy_idx;
+		tms->m_old_frame_pitch_idx = tms->m_new_frame_pitch_idx;
+		for (i = 0; i < tms->m_coeff->num_k; i++)
+			tms->m_old_frame_k_idx[i] = tms->m_new_frame_k_idx[i];
+#endif
+
+		/* Parse a new frame into the new_target_energy, new_target_pitch and new_target_k[] */
+		tms5220_parse_frame(tms);
+
+		/* if the new frame is a stop frame, unset both TALK and SPEN (via TCON). TALKD remains active while the energy is ramping to 0. */
+		if ((tms->m_new_frame_energy_idx == 0x0F))
+		{
+			tms->m_TALK = tms->m_SPEN = false;
+			tms5220_update_fifo_status_and_ints(tms); // probably not necessary...
+		}
+
+		/* in all cases where interpolation would be inhibited, set the inhibit flag; otherwise clear it.
+		 * Interpolation inhibit cases:
+		 * Old frame was voiced, new is unvoiced
+		 * Old frame was silence/zero energy, new has non-zero energy
+		 * Old frame was unvoiced, new is voiced
+		 * Old frame was unvoiced, new frame is silence/zero energy (non-existent on tms51xx rev D and F (present and working on tms52xx, present but buggy on tms51xx rev A and B))
+		 */
+		if ( (!tms->m_OLDP && (tms->m_new_frame_pitch_idx == 0))
+			|| (tms->m_OLDP && !(tms->m_new_frame_pitch_idx == 0))
+			|| (tms->m_OLDE && !(tms->m_new_frame_energy_idx == 0))
+			//|| (tms->m_inhibit && tms->m_OLDP && (tms->m_new_frame_energy_idx == 0)) ) //TMS51xx INTERP BUG1
+			|| (tms->m_OLDP && (tms->m_new_frame_energy_idx == 0)) )
+			tms->m_inhibit = true;
+		else // normal frame, normal interpolation
+			tms->m_inhibit = false;
+
+		/* Debug info for current parsed frame */
+		
+		
+		
+		
+	}
+	else // Not a new frame, just interpolate the existing frame.
+	{
+		bool inhibit_state = (tms->m_inhibit && (tms->m_IP != 0)); // disable inhibit when reaching the last interp period, but don't overwrite the tms->m_inhibit value
+#ifdef TMS5220_PERFECT_INTERPOLATION_HACK
+		int samples_per_frame = tms->m_subc_reload?175:266; // either (13 A cycles + 12 B cycles) * 7 interps for normal SPEAK/SPKEXT, or (13*2 A cycles + 12 B cycles) * 7 interps for SPKSLOW
+		//int samples_per_frame = tms->m_subc_reload?200:304; // either (13 A cycles + 12 B cycles) * 8 interps for normal SPEAK/SPKEXT, or (13*2 A cycles + 12 B cycles) * 8 interps for SPKSLOW
+		int current_sample = (tms->m_subcycle - tms->m_subc_reload)+(tms->m_PC*(3-tms->m_subc_reload))+((tms->m_subc_reload?25:38)*((tms->m_IP-1)&7));
+		//
+		// reset the current energy, pitch, etc to what it was at frame start
+		tms->m_current_energy = (tms->m_coeff->energytable[tms->m_old_frame_energy_idx] * (1-tms->m_old_zpar));
+		tms->m_current_pitch = (tms->m_coeff->pitchtable[tms->m_old_frame_pitch_idx] * (1-tms->m_old_zpar));
+		for (i = 0; i < tms->m_coeff->num_k; i++)
+			tms->m_current_k[i] = (tms->m_coeff->ktable[i][tms->m_old_frame_k_idx[i]] * (1-((i<4)?tms->m_old_zpar:tms->m_old_uv_zpar)));
+		// now adjust each value to be exactly correct for each of the samples per frame
+		if (tms->m_IP != 0) // if we're still interpolating...
+		{
+			tms->m_current_energy = (tms->m_current_energy + (((tms->m_coeff->energytable[tms->m_new_frame_energy_idx] - tms->m_current_energy)*(1-inhibit_state))*current_sample)/samples_per_frame)*(1-tms->m_zpar);
+			tms->m_current_pitch = (tms->m_current_pitch + (((tms->m_coeff->pitchtable[tms->m_new_frame_pitch_idx] - tms->m_current_pitch)*(1-inhibit_state))*current_sample)/samples_per_frame)*(1-tms->m_zpar);
+			for (i = 0; i < tms->m_coeff->num_k; i++)
+				tms->m_current_k[i] = (tms->m_current_k[i] + (((tms->m_coeff->ktable[i][tms->m_new_frame_k_idx[i]] - tms->m_current_k[i])*(1-inhibit_state))*current_sample)/samples_per_frame)*(1-((i<4)?tms->m_zpar:tms->m_uv_zpar));
+		}
+		else // we're done, play this frame for 1/8 frame.
+		{
+			if (tms->m_subcycle == 2) tms->m_pitch_zero = false; // this reset happens around the second subcycle during IP=0
+			tms->m_current_energy = (tms->m_coeff->energytable[tms->m_new_frame_energy_idx] * (1-tms->m_zpar));
+			tms->m_current_pitch = (tms->m_coeff->pitchtable[tms->m_new_frame_pitch_idx] * (1-tms->m_zpar));
+			for (i = 0; i < tms->m_coeff->num_k; i++)
+				tms->m_current_k[i] = (tms->m_coeff->ktable[i][tms->m_new_frame_k_idx[i]] * (1-((i<4)?tms->m_zpar:tms->m_uv_zpar)));
+		}
+#else
+		//Updates to parameters only happen on subcycle '2' (B cycle) of PCs.
+		if (tms->m_subcycle == 2)
+		{
+			switch(tms->m_PC)
+			{
+				case 0: /* PC = 0, B cycle, write updated energy */
+				if (tms->m_IP==0) tms->m_pitch_zero = 0; // this reset happens around the second subcycle during IP=0
+				tms->m_current_energy = (tms->m_current_energy + (((tms->m_coeff->energytable[tms->m_new_frame_energy_idx] - tms->m_current_energy)*(1-inhibit_state)) INTERP_SHIFT))*(1-tms->m_zpar);
+				break;
+				case 1: /* PC = 1, B cycle, write updated pitch */
+				tms->m_current_pitch = (tms->m_current_pitch + (((tms->m_coeff->pitchtable[tms->m_new_frame_pitch_idx] - tms->m_current_pitch)*(1-inhibit_state)) INTERP_SHIFT))*(1-tms->m_zpar);
+				break;
+				case 2: case 3: case 4: case 5: case 6: case 7: case 8: case 9: case 10: case 11:
+				/* PC = 2 through 11, B cycle, write updated K1 through K10 */
+				tms->m_current_k[tms->m_PC-2] = (tms->m_current_k[tms->m_PC-2] + (((tms->m_coeff->ktable[tms->m_PC-2][tms->m_new_frame_k_idx[tms->m_PC-2]] - tms->m_current_k[tms->m_PC-2])*(1-inhibit_state)) INTERP_SHIFT))*(1-(((tms->m_PC-2)<4)?tms->m_zpar:tms->m_uv_zpar));
+				break;
+				case 12: /* PC = 12 */
+				/* we should NEVER reach this point, PC=12 doesn't have a subcycle 2 */
+				break;
+			}
+		}
+#endif
+	}
+}
+
+static void tms5220_advance_counters(tms5220_state *tms)
+{
+	tms->m_subcycle++;
+	if ((tms->m_subcycle == 2) && (tms->m_PC == 12)) // RESETF3
+	{
+		/* Circuit 412 in the patent acts a reset, resetting the pitch counter to 0
+		 * if INHIBIT was true during the most recent frame transition.
+		 * The exact time this occurs is betwen IP=7, PC=12 sub=0, T=t12
+		 * and tms->m_IP = 0, PC=0 sub=0, T=t12, a period of exactly 20 cycles,
+		 * which overlaps the time OLDE and OLDP are updated at IP=7 PC=12 T17
+		 * (and hence INHIBIT itself 2 t-cycles later).
+		 * According to testing the pitch zeroing lasts approximately 2 samples.
+		 * We set the zeroing latch here, and unset it on PC=1 in the generator.
+		 */
+		if ((tms->m_IP == 7) && tms->m_inhibit) tms->m_pitch_zero = true;
+		if (tms->m_IP == 7) // RESETL4
+		{
+			// Latch OLDE and OLDP
+			//if (tms->m_OLDE) tms->m_uv_zpar = false; // TMS51xx INTERP BUG2
+			tms->m_OLDE = (tms->m_new_frame_energy_idx == 0); // tms->m_OLDE
+			tms->m_OLDP = (tms->m_new_frame_pitch_idx == 0); // tms->m_OLDP
+			/* if TALK was clear last frame, halt speech now, since TALKD (latched from TALK on new frame) just went inactive. */
+
+			/* NOTE: in MAME this latch is preceded by an
+			 * `if ((!m_TALK) && (!m_SPEN))` guarding a LOGMASKED
+			 * call only. Stripping the log statement during the
+			 * port left the `if` with an empty body, so it
+			 * captured the latch below and made it conditional --
+			 * see notes/pacing_talkd_latch_bug.md. The latch is
+			 * unconditional; do not reintroduce a guard here. */
+			tms->m_TALKD = tms->m_TALK; // TALKD is latched from TALK
+			tms5220_update_fifo_status_and_ints(tms); // to trigger an interrupt if talk_status has changed
+			if ((!tms->m_TALK) && tms->m_SPEN) tms->m_TALK = true; // TALK is only activated if it wasn't already active, if tms->m_SPEN is active, and if we're in RESETL4 (which we are).
+
+			
+		}
+		tms->m_subcycle = tms->m_subc_reload;
+		tms->m_PC = 0;
+		tms->m_IP++;
+		tms->m_IP &= 0x7;
+	}
+	else if (tms->m_subcycle == 3)
+	{
+		tms->m_subcycle = tms->m_subc_reload;
+		tms->m_PC++;
+	}
+}
+
+void tms5220_set_speech_rate(tms5220_state *tms, double rate)
+{
+	if (rate < 0.1 || rate > 8.0) return;
+	tms->m_speech_rate = rate;
+}
+
 void tms5220_process(tms5220_state *tms, int16_t *buffer, unsigned int size)
 {
 	int buf_count = 0;
-	int i, bitout;
+	int i, bitout, steps;
 	int32_t this_sample;
 
 	
@@ -459,108 +639,27 @@ void tms5220_process(tms5220_state *tms, int16_t *buffer, unsigned int size)
 			* (In reality, the frame was really loaded incrementally during the entire IP=0
 			* PC=x time period, but it doesn't affect anything until IP=0 PC=12 happens)
 			*/
-			if ((tms->m_IP == 0) && (tms->m_PC == 12) && (tms->m_subcycle == 1))
+			/* Run the parameter state machine `steps` times for this one
+			 * output sample. At the default rate that is exactly once,
+			 * in the original order -- step, generate, advance -- so the
+			 * output is bit-identical to MAME's. Faster rates take more
+			 * machine cycles per sample and so walk the frame sooner;
+			 * slower rates sometimes take none and hold the frame while
+			 * the audio path below keeps running, which is what leaves
+			 * the pitch untouched. */
+			steps = 1;
+			if (tms->m_speech_rate != 1.0)
 			{
-				// HACK for regression testing, be sure to comment out before release!
-				//tms->m_RNG = 0x1234;
-				// end HACK
-
-				/* appropriately override the interp count if needed; this will be incremented after the frame parse! */
-				tms->m_IP = reload_table[tms->m_c_variant_rate&0x3];
-
-#ifdef TMS5220_PERFECT_INTERPOLATION_HACK
-				/* remember previous frame energy, pitch, and coefficients */
-				tms->m_old_frame_energy_idx = tms->m_new_frame_energy_idx;
-				tms->m_old_frame_pitch_idx = tms->m_new_frame_pitch_idx;
-				for (i = 0; i < tms->m_coeff->num_k; i++)
-					tms->m_old_frame_k_idx[i] = tms->m_new_frame_k_idx[i];
-#endif
-
-				/* Parse a new frame into the new_target_energy, new_target_pitch and new_target_k[] */
-				tms5220_parse_frame(tms);
-
-				/* if the new frame is a stop frame, unset both TALK and SPEN (via TCON). TALKD remains active while the energy is ramping to 0. */
-				if ((tms->m_new_frame_energy_idx == 0x0F))
-				{
-					tms->m_TALK = tms->m_SPEN = false;
-					tms5220_update_fifo_status_and_ints(tms); // probably not necessary...
-				}
-
-				/* in all cases where interpolation would be inhibited, set the inhibit flag; otherwise clear it.
-				 * Interpolation inhibit cases:
-				 * Old frame was voiced, new is unvoiced
-				 * Old frame was silence/zero energy, new has non-zero energy
-				 * Old frame was unvoiced, new is voiced
-				 * Old frame was unvoiced, new frame is silence/zero energy (non-existent on tms51xx rev D and F (present and working on tms52xx, present but buggy on tms51xx rev A and B))
-				 */
-				if ( (!tms->m_OLDP && (tms->m_new_frame_pitch_idx == 0))
-					|| (tms->m_OLDP && !(tms->m_new_frame_pitch_idx == 0))
-					|| (tms->m_OLDE && !(tms->m_new_frame_energy_idx == 0))
-					//|| (tms->m_inhibit && tms->m_OLDP && (tms->m_new_frame_energy_idx == 0)) ) //TMS51xx INTERP BUG1
-					|| (tms->m_OLDP && (tms->m_new_frame_energy_idx == 0)) )
-					tms->m_inhibit = true;
-				else // normal frame, normal interpolation
-					tms->m_inhibit = false;
-
-				/* Debug info for current parsed frame */
-				
-				
-				
-				
+				tms->m_rate_acc += tms->m_speech_rate;
+				steps = (int)tms->m_rate_acc;
+				tms->m_rate_acc -= steps;
 			}
-			else // Not a new frame, just interpolate the existing frame.
+			for (i = 1; i < steps; i++)
 			{
-				bool inhibit_state = (tms->m_inhibit && (tms->m_IP != 0)); // disable inhibit when reaching the last interp period, but don't overwrite the tms->m_inhibit value
-#ifdef TMS5220_PERFECT_INTERPOLATION_HACK
-				int samples_per_frame = tms->m_subc_reload?175:266; // either (13 A cycles + 12 B cycles) * 7 interps for normal SPEAK/SPKEXT, or (13*2 A cycles + 12 B cycles) * 7 interps for SPKSLOW
-				//int samples_per_frame = tms->m_subc_reload?200:304; // either (13 A cycles + 12 B cycles) * 8 interps for normal SPEAK/SPKEXT, or (13*2 A cycles + 12 B cycles) * 8 interps for SPKSLOW
-				int current_sample = (tms->m_subcycle - tms->m_subc_reload)+(tms->m_PC*(3-tms->m_subc_reload))+((tms->m_subc_reload?25:38)*((tms->m_IP-1)&7));
-				//
-				// reset the current energy, pitch, etc to what it was at frame start
-				tms->m_current_energy = (tms->m_coeff->energytable[tms->m_old_frame_energy_idx] * (1-tms->m_old_zpar));
-				tms->m_current_pitch = (tms->m_coeff->pitchtable[tms->m_old_frame_pitch_idx] * (1-tms->m_old_zpar));
-				for (i = 0; i < tms->m_coeff->num_k; i++)
-					tms->m_current_k[i] = (tms->m_coeff->ktable[i][tms->m_old_frame_k_idx[i]] * (1-((i<4)?tms->m_old_zpar:tms->m_old_uv_zpar)));
-				// now adjust each value to be exactly correct for each of the samples per frame
-				if (tms->m_IP != 0) // if we're still interpolating...
-				{
-					tms->m_current_energy = (tms->m_current_energy + (((tms->m_coeff->energytable[tms->m_new_frame_energy_idx] - tms->m_current_energy)*(1-inhibit_state))*current_sample)/samples_per_frame)*(1-tms->m_zpar);
-					tms->m_current_pitch = (tms->m_current_pitch + (((tms->m_coeff->pitchtable[tms->m_new_frame_pitch_idx] - tms->m_current_pitch)*(1-inhibit_state))*current_sample)/samples_per_frame)*(1-tms->m_zpar);
-					for (i = 0; i < tms->m_coeff->num_k; i++)
-						tms->m_current_k[i] = (tms->m_current_k[i] + (((tms->m_coeff->ktable[i][tms->m_new_frame_k_idx[i]] - tms->m_current_k[i])*(1-inhibit_state))*current_sample)/samples_per_frame)*(1-((i<4)?tms->m_zpar:tms->m_uv_zpar));
-				}
-				else // we're done, play this frame for 1/8 frame.
-				{
-					if (tms->m_subcycle == 2) tms->m_pitch_zero = false; // this reset happens around the second subcycle during IP=0
-					tms->m_current_energy = (tms->m_coeff->energytable[tms->m_new_frame_energy_idx] * (1-tms->m_zpar));
-					tms->m_current_pitch = (tms->m_coeff->pitchtable[tms->m_new_frame_pitch_idx] * (1-tms->m_zpar));
-					for (i = 0; i < tms->m_coeff->num_k; i++)
-						tms->m_current_k[i] = (tms->m_coeff->ktable[i][tms->m_new_frame_k_idx[i]] * (1-((i<4)?tms->m_zpar:tms->m_uv_zpar)));
-				}
-#else
-				//Updates to parameters only happen on subcycle '2' (B cycle) of PCs.
-				if (tms->m_subcycle == 2)
-				{
-					switch(tms->m_PC)
-					{
-						case 0: /* PC = 0, B cycle, write updated energy */
-						if (tms->m_IP==0) tms->m_pitch_zero = 0; // this reset happens around the second subcycle during IP=0
-						tms->m_current_energy = (tms->m_current_energy + (((tms->m_coeff->energytable[tms->m_new_frame_energy_idx] - tms->m_current_energy)*(1-inhibit_state)) INTERP_SHIFT))*(1-tms->m_zpar);
-						break;
-						case 1: /* PC = 1, B cycle, write updated pitch */
-						tms->m_current_pitch = (tms->m_current_pitch + (((tms->m_coeff->pitchtable[tms->m_new_frame_pitch_idx] - tms->m_current_pitch)*(1-inhibit_state)) INTERP_SHIFT))*(1-tms->m_zpar);
-						break;
-						case 2: case 3: case 4: case 5: case 6: case 7: case 8: case 9: case 10: case 11:
-						/* PC = 2 through 11, B cycle, write updated K1 through K10 */
-						tms->m_current_k[tms->m_PC-2] = (tms->m_current_k[tms->m_PC-2] + (((tms->m_coeff->ktable[tms->m_PC-2][tms->m_new_frame_k_idx[tms->m_PC-2]] - tms->m_current_k[tms->m_PC-2])*(1-inhibit_state)) INTERP_SHIFT))*(1-(((tms->m_PC-2)<4)?tms->m_zpar:tms->m_uv_zpar));
-						break;
-						case 12: /* PC = 12 */
-						/* we should NEVER reach this point, PC=12 doesn't have a subcycle 2 */
-						break;
-					}
-				}
-#endif
+				tms5220_step_parameters(tms);
+				tms5220_advance_counters(tms);
 			}
+			if (steps > 0) tms5220_step_parameters(tms);
 
 			// calculate the output
 			if (tms->m_OLDP)
@@ -625,50 +724,7 @@ void tms5220_process(tms5220_state *tms, int16_t *buffer, unsigned int size)
 			}
 			// Update all counts
 
-			tms->m_subcycle++;
-			if ((tms->m_subcycle == 2) && (tms->m_PC == 12)) // RESETF3
-			{
-				/* Circuit 412 in the patent acts a reset, resetting the pitch counter to 0
-				 * if INHIBIT was true during the most recent frame transition.
-				 * The exact time this occurs is betwen IP=7, PC=12 sub=0, T=t12
-				 * and tms->m_IP = 0, PC=0 sub=0, T=t12, a period of exactly 20 cycles,
-				 * which overlaps the time OLDE and OLDP are updated at IP=7 PC=12 T17
-				 * (and hence INHIBIT itself 2 t-cycles later).
-				 * According to testing the pitch zeroing lasts approximately 2 samples.
-				 * We set the zeroing latch here, and unset it on PC=1 in the generator.
-				 */
-				if ((tms->m_IP == 7) && tms->m_inhibit) tms->m_pitch_zero = true;
-				if (tms->m_IP == 7) // RESETL4
-				{
-					// Latch OLDE and OLDP
-					//if (tms->m_OLDE) tms->m_uv_zpar = false; // TMS51xx INTERP BUG2
-					tms->m_OLDE = (tms->m_new_frame_energy_idx == 0); // tms->m_OLDE
-					tms->m_OLDP = (tms->m_new_frame_pitch_idx == 0); // tms->m_OLDP
-					/* if TALK was clear last frame, halt speech now, since TALKD (latched from TALK on new frame) just went inactive. */
-
-					/* NOTE: in MAME this latch is preceded by an
-					 * `if ((!m_TALK) && (!m_SPEN))` guarding a LOGMASKED
-					 * call only. Stripping the log statement during the
-					 * port left the `if` with an empty body, so it
-					 * captured the latch below and made it conditional --
-					 * see notes/pacing_talkd_latch_bug.md. The latch is
-					 * unconditional; do not reintroduce a guard here. */
-					tms->m_TALKD = tms->m_TALK; // TALKD is latched from TALK
-					tms5220_update_fifo_status_and_ints(tms); // to trigger an interrupt if talk_status has changed
-					if ((!tms->m_TALK) && tms->m_SPEN) tms->m_TALK = true; // TALK is only activated if it wasn't already active, if tms->m_SPEN is active, and if we're in RESETL4 (which we are).
-
-					
-				}
-				tms->m_subcycle = tms->m_subc_reload;
-				tms->m_PC = 0;
-				tms->m_IP++;
-				tms->m_IP &= 0x7;
-			}
-			else if (tms->m_subcycle == 3)
-			{
-				tms->m_subcycle = tms->m_subc_reload;
-				tms->m_PC++;
-			}
+			if (steps > 0) tms5220_advance_counters(tms);
 			tms->m_pitch_count++;
 			if ((tms->m_pitch_count >= tms->m_current_pitch) || tms->m_pitch_zero) tms->m_pitch_count = 0;
 			tms->m_pitch_count &= 0x1FF;

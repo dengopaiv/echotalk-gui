@@ -59,7 +59,7 @@ typedef struct echotalk echotalk;
  * runtime -- which is what a screen reader does -- has no compile-time
  * check available, so it should call echotalk_abi_version() and compare
  * against this before anything else. */
-#define ECHOTALK_ABI_VERSION 3
+#define ECHOTALK_ABI_VERSION 4
 ECHOTALK_API unsigned echotalk_abi_version(void);
 
 /* --- lifecycle --- */
@@ -85,7 +85,8 @@ ECHOTALK_API const char *echotalk_version(const echotalk *et);
  * The four rate-ish controls are deliberately independent:
  *
  *   pitch            pitch only     Textalker's own nP command
- *   frame rate       speed only     TMS5220 interpolation periods
+ *   speed            speed only     continuous, 0.25 to 4.0 -- USE THIS
+ *   frame rate       speed only     TMS5220's own four fixed steps
  *   clock multiplier speed + pitch  the "sped-up tape" character
  *   sample rate      neither        output format only
  */
@@ -107,6 +108,26 @@ ECHOTALK_API int echotalk_set_clock_multiplier(echotalk *et, double multiplier);
  * SET RATE command is a no-op. Higher rates skip the gentler early
  * interpolation steps, so timbre changes as well as speed. */
 ECHOTALK_API int echotalk_set_frame_rate(echotalk *et, int rate);
+
+/* Continuous speech rate, 0.25 to 4.0, default 1.0. Changes speed only;
+ * the pitch does not move.
+ *
+ * This is the one to reach for. The frame rate above is real 5220C
+ * behaviour but offers four fixed steps, all at or above normal speed,
+ * and the top one is rough -- not enough for a screen reader that wants
+ * a smooth range either side of normal.
+ *
+ * It works by scaling how fast the chip's parameter state machine walks
+ * a frame while the lattice filter keeps producing one sample per
+ * output sample. Pitch comes from the sample-rate side of that split,
+ * so it stays put. 1.0 is off and byte-exact -- the default path is
+ * indistinguishable from MAME's.
+ *
+ * Not something a real Echo II could do, and worth saying so in a UI.
+ * Far from 1.0 the interpolation is being stretched or compressed well
+ * past anything the chip was designed for, so judge the extremes by
+ * ear rather than assuming the whole range is equally usable. */
+ECHOTALK_API int echotalk_set_speed(echotalk *et, double speed);
 
 /* Textalker's own two speech rates: 0 expanded (default), 1 compressed.
  * It implements these by skipping phoneme segments rather than by
@@ -218,6 +239,7 @@ ECHOTALK_API int      echotalk_letter_mode(const echotalk *et);
 ECHOTALK_API int      echotalk_punctuation(const echotalk *et);
 ECHOTALK_API int      echotalk_frame_rate(const echotalk *et);
 ECHOTALK_API double   echotalk_clock_multiplier(const echotalk *et);
+ECHOTALK_API double   echotalk_speed(const echotalk *et);
 ECHOTALK_API unsigned echotalk_sample_rate(const echotalk *et);
 ECHOTALK_API int      echotalk_raw(const echotalk *et);
 
@@ -248,6 +270,7 @@ ECHOTALK_API int      echotalk_raw(const echotalk *et);
  * an optional number, then a letter.
  *
  *   \x04 2F     frame rate 2          \x04F   frame rate back to default
+ *   \x04 1.5S   speed, pitch kept     \x04S   speed back to 1.0
  *   \x04 0.75C  clock multiplier      \x04C   clock back to 1.0
  *   \x04 0B     chunking off          \x04 80B  chunk at 80 characters
  *   \x04 1R     raw text on           \x04 0R   raw text off

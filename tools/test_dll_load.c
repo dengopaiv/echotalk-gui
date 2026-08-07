@@ -136,13 +136,15 @@ int main(int argc, char **argv) {
     fn_get_int    getfr   = (fn_get_int)sym("echotalk_frame_rate");
     fn_get_int    getraw  = (fn_get_int)sym("echotalk_raw");
     fn_get_dbl    getclk  = (fn_get_dbl)sym("echotalk_clock_multiplier");
+    fn_set_double setspd  = (fn_set_double)sym("echotalk_set_speed");
+    fn_get_dbl    getspd  = (fn_get_dbl)sym("echotalk_speed");
     fn_get_uint   gethz   = (fn_get_uint)sym("echotalk_sample_rate");
 
     if (failures) { printf("\n%d export(s) missing\n", failures); return 1; }
-    printf("  ok    all resolved (%d of the 39 exports are used here)\n", 37);
+    printf("  ok    all 41 exports resolved\n");
 
     sprintf(detail, "got %u", abi());
-    check("abi version", abi() == 3, detail);
+    check("abi version", abi() == 4, detail);
 
     char err[256] = {0};
     void *et = create(argv[2], argv[3], err, sizeof err);
@@ -236,6 +238,18 @@ int main(int argc, char **argv) {
             g_nmarks ? g_mark_pos[g_nmarks - 1] : (size_t)0, idx_total);
     check("last mark lands at the end of the audio",
           g_nmarks == 3 && g_mark_pos[2] == idx_total, detail);
+
+    /* --- continuous speed: monotonic, and it crosses the ABI as a
+     * double like the clock multiplier does. */
+    setspd(et, 0.5); say(et, "Aaaaah."); size_t slow = drain(et, rd, nextidx);
+    setspd(et, 1.0); say(et, "Aaaaah."); size_t norm = drain(et, rd, nextidx);
+    setspd(et, 2.0); say(et, "Aaaaah."); size_t fastr = drain(et, rd, nextidx);
+    sprintf(detail, "%zu / %zu / %zu samples at 0.5 / 1.0 / 2.0", slow, norm, fastr);
+    check("speed is monotonic across the ABI", slow > norm && norm > fastr, detail);
+    check("set_speed(9) rejected", setspd(et, 9.0) == -1, "");
+    check("speed reads back", setspd(et, 1.5) == 0 && getspd(et) > 1.49 &&
+                              getspd(et) < 1.51, "");
+    setspd(et, 1.0);
 
     /* --- Ctrl-E commands in the text must update the settings ---
      *

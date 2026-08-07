@@ -62,6 +62,7 @@ struct echotalk {
     unsigned out_rate;
     double clock_mult;
     int frame_rate;
+    double speed;               /* continuous, pitch-preserving  */
     int compressed;
     int pitch, flat;
     int volume;
@@ -315,6 +316,7 @@ echotalk *echotalk_create(const char *loader_path, const char *obj_path,
     }
     et->out_rate = CHIP_HZ;
     et->clock_mult = 1.0;
+    et->speed = 1.0;
     et->pitch = 24;
     et->volume = 12;
     et->word_delay = 0;
@@ -373,6 +375,14 @@ int echotalk_set_frame_rate(echotalk *et, int rate) {
     et->tms.m_c_variant_rate = (uint8_t)rate;
     return 0;
 }
+
+int echotalk_set_speed(echotalk *et, double speed) {
+    if (speed < 0.25 || speed > 4.0) return -1;
+    et->speed = speed;
+    tms5220_set_speech_rate(&et->tms, speed);
+    return 0;
+}
+double echotalk_speed(const echotalk *et) { return et->speed; }
 
 int echotalk_set_compressed(echotalk *et, int c) {
     et->compressed = c ? 1 : 0; et->settings_dirty = 1; return 0;
@@ -722,6 +732,8 @@ static int apply_drv_cmd(echotalk *et, char letter, int has_value, double value)
         return echotalk_set_frame_rate(et, n);
     case 'C': case 'c':                       /* chip clock multiplier */
         return echotalk_set_clock_multiplier(et, has_value ? value : 1.0);
+    case 'S': case 's':                       /* speed, pitch-preserving */
+        return echotalk_set_speed(et, has_value ? value : 1.0);
     case 'B': case 'b':                       /* line buffer / chunking */
         if (!has_value) return echotalk_set_chunk_size(et, DEFAULT_CHUNK);
         if (drv_int(value, &n)) return -1;
