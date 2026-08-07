@@ -1,7 +1,8 @@
 # EchoTalk project handoff
 
 Last substantially rewritten at the end of session 10, which resolved
-every long-standing open bug. Read this first; `notes/` holds the
+every long-standing open bug; session 11 fixed the single-character
+"return" bug found after that. Read this first; `notes/` holds the
 detailed writeups, referenced from here where relevant.
 
 ## Read this first: who you're working with
@@ -160,9 +161,11 @@ both, and the sample rate changes neither. See
 Behaviour worth knowing:
 
 - An utterance that is exactly one character after preparation and
-  chunking is wrapped in `Ctrl-E L`/`Ctrl-E A` and restored afterwards
-  with `Ctrl-E S`/`Ctrl-E W`, so a lone letter or punctuation mark is
-  announced rather than swallowed. A bare `,` is silent without this.
+  chunking is wrapped in `Ctrl-E L`/`Ctrl-E A` and restored with
+  `Ctrl-E S`/`Ctrl-E W` **before the terminating CR**, so a lone letter
+  or punctuation mark is announced rather than swallowed. A bare `,` is
+  silent without the wrapping; restoring after the CR instead of before
+  it makes Textalker announce the CR as "return".
 - Boot audio is discarded, which matters most for v1.3 and its ~1.37 s
   calibration delay.
 - Dead air is trimmed at the head of **every** utterance, not just the
@@ -256,67 +259,32 @@ phoneme mode terminated by CR.
 which otherwise speaks `EEEEEEEEE` as `EE`. The tools do this by
 default.
 
-## Known bug: single-character utterances also speak "return"
+## Fixed in session 11: single-character utterances also spoke "return"
 
-Found by the user, by ear, after the library was written.
+Found by Jayson by ear after the library was written, and fixed by
+reordering one line. `notes/single_char_return_bug_fixed.md`
 
 The library wraps a one-character utterance in `Ctrl-E L` (letter mode)
-and `Ctrl-E A` (all punctuation), then restores `Ctrl-E S` / `Ctrl-E W`
-afterwards, so that a lone letter or punctuation mark is announced
-rather than swallowed. That part works -- a bare `,` says "comma", where
-before it was silent.
+and `Ctrl-E A` (all punctuation) and restores `Ctrl-E S` / `Ctrl-E W`
+afterwards, so a lone letter or punctuation mark is announced rather
+than swallowed. But the CR that terminates the utterance is itself a
+character, and in all-punctuation mode Textalker announces it as
+"return" -- so asking for one character got two spoken items.
 
-**But the CR that terminates the utterance is itself a character, and in
-all-punctuation mode Textalker announces it as "return".** So asking for
-one character gets you two spoken items. Undesirable, and it will be
-worse in a screen reader than it is in `say`, since character review is
-exactly the case this path exists for.
+The restore now goes **before** the CR rather than after it. Textalker
+buffers the whole line and processes it in order when the CR arrives, so
+a Ctrl-E command sitting in the buffer takes effect partway through that
+pass: the character was buffered ahead of the restore and is still
+announced, while the CR is reached after it and stays silent.
 
-The fix is not to stop sending CR: that is what makes Textalker speak at
-all. What is needed is a way to have it speak a single character
-*without* a line terminator.
+Two things worth keeping from that investigation:
 
-### Where to look, per the user's suggestion
-
-Textalker must already have a "speak the character just typed" routine,
-because that is what it does when echoing keyboard input, and no CR is
-involved there. Find it and call it directly for the single-character
-case.
-
-The project already knows where that lives. The v3.1.3 loader installs
-three trampolines, and the third is the keyboard one:
-
-```
-$BA72 -> JMP $D003   init
-$BA7C -> JMP $D006   character output  (what the library uses now)
-$BCF0 -> JMP $D009   keyboard echo / review cursor
-```
-
-`$D009` was investigated in session 2 (`notes/session2_findings.md`) and
-set aside: every path traced through it ended in a blocking
-keyboard-poll and flashing-cursor loop, which never returns in a
-headless harness. That does not mean the routine is unusable -- it means
-the *entry point* waits for a keypress. Somewhere inside that path there
-is almost certainly a "speak this one character now" subroutine that can
-be called directly, below the level that polls the keyboard.
-
-Suggested approach:
-
-1. Disassemble forward from `$D009` looking for where it dispatches a
-   character to speech, as distinct from where it waits for input.
-2. Check whether the keyboard buffer / last-key zero-page location can
-   be primed so the polling loop finds a character already waiting and
-   returns immediately.
-3. Compare against v1.3, whose keyboard vector the loader also installs
-   (`$38`/`$39` are set to `$BCF0` there too -- see the disassembly in
-   `notes/multi_version_support_design.md`). If both versions expose the
-   same shape, the fix can be version-agnostic like the rest.
-
-Failing all that, a fallback worth measuring: leave letter mode on but
-**do not** switch to all-punctuation, so the CR is not announced, and
-accept that punctuation marks alone stay silent. That trades one problem
-for a smaller one, and is a one-line change if the proper fix proves
-expensive.
+- **`Ctrl-E W` is word mode, not punctuation mode.** Only `Ctrl-E S`
+  (some-punctuation) turns the announcement off. `\x05A,\r\x05W` still
+  says "return"; `\x05A,\x05S\r` does not.
+- The `$D009` keyboard-echo trampoline was **not** needed. Session 2 set
+  it aside because it blocks on a keypress, and that is still true; it
+  simply is not a problem this bug required solving.
 
 ## What is left
 

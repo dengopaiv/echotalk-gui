@@ -25,7 +25,9 @@ is left is packaging it as a DLL and making it stream.**
   stripping, and Textalker's repeat filter disabled so `EEEEEEEEE` is
   not spoken as `EE`.
 - Every bug found so far is fixed, including a speech-pacing defect
-  traced to a `#define` lost during the port from MAME.
+  traced to a `#define` lost during the port from MAME, and a
+  single-character utterance that also announced its own line
+  terminator as "return".
 
 - The library is in `src/echotalk.[ch]`: create it with a loader and OBJ
   image, set pitch, volume, word delay, repeat filter, expanded or

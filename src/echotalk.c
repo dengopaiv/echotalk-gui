@@ -358,9 +358,19 @@ static void apply_settings(echotalk *et) {
  * A single character on its own is almost always meant as a character
  * rather than a word -- a letter being reviewed, a punctuation mark
  * being announced -- so it is wrapped in letter mode and
- * all-punctuation, then set back to word mode and some-punctuation
- * afterwards. Without this a lone "," is silent and a lone letter can
- * be read as a word or swallowed by the command dispatcher. */
+ * all-punctuation, then set back to word mode and some-punctuation.
+ * Without this a lone "," is silent and a lone letter can be read as a
+ * word or swallowed by the command dispatcher.
+ *
+ * The restore goes BEFORE the CR, not after it. Textalker buffers the
+ * whole line and processes it in order when the CR arrives, so a
+ * command sitting in the buffer takes effect partway through that pass
+ * -- which means the terminating CR is itself seen in whatever
+ * punctuation mode is current by then. Left in all-punctuation, it is
+ * announced as "return", so asking for one character got you two spoken
+ * items. Restoring some-punctuation first silences the CR while still
+ * leaving the character itself to be processed in all-punctuation
+ * mode, since it was buffered ahead of the restore. */
 static void send_utterance(echotalk *et, const char *s, size_t len) {
     int single = (len == 1);
     /* Record where this utterance's audio starts. Textalker processes a
@@ -373,8 +383,8 @@ static void send_utterance(echotalk *et, const char *s, size_t len) {
         et->marks[et->nmarks++] = et->count;
     if (single) send_string(et, "\x05L\x05" "A");
     for (size_t i = 0; i < len; i++) send_char(et, (uint8_t)s[i]);
-    send_char(et, '\r');
     if (single) send_string(et, "\x05S\x05W");
+    send_char(et, '\r');
 }
 
 int echotalk_speak(echotalk *et, const char *text) {

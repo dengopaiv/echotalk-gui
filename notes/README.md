@@ -23,6 +23,11 @@ authoritative**, not the numbers here.
   handling, and encoding conversion.
 - `single_letter_word_bug_fixed.md` — an infinite BRK loop from a
   missing ROM stub; also where the wild-jump trap came from.
+- `single_char_return_bug_fixed.md` — a lone character also spoke
+  "return". Fixed by moving the mode restore before the CR rather than
+  after it. Records the ordering property that makes that work:
+  Textalker buffers a whole line and processes embedded Ctrl-E commands
+  in sequence when the CR arrives.
 - `tms5220_port_dangling_statements.md` — five instances of stripped log
   calls leaving dangling control flow. Read before touching the port.
 
