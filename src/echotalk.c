@@ -47,13 +47,28 @@ struct echotalk {
     uint16_t entry;
     char version[16];
 
-    /* settings */
+    /* --- settings ---
+     *
+     * Everything Textalker itself holds is mirrored here, and kept in
+     * step whether it was set through the API or by a Ctrl-E command
+     * embedded in the text -- see sniff_ctrl_e(). Without that the two
+     * drift apart, and the next settings push would quietly undo
+     * whatever the text had asked for.
+     *
+     * Pitch and flatness are one Textalker setting, not two: "nP" sets
+     * the pitch and normal intonation, "nF" sets the same pitch and
+     * monotone. They are stored apart because that is how a caller
+     * thinks about them, and recombined when the command is sent. */
     unsigned out_rate;
     double clock_mult;
     int frame_rate;
     int compressed;
-    int pitch, volume;
+    int pitch, flat;
+    int volume;
     int word_delay, repeat_filter;
+    int letter_mode;            /* 0 word, 1 letter                    */
+    int punctuation;            /* 0 none, 1 some, 2 all               */
+    int modes_chosen;           /* caller picked the two above         */
     size_t chunk_size;          /* 0 = do not chunk */
     int raw;                    /* 1 = skip text preparation */
     unsigned cmd_errors;        /* malformed Ctrl-D commands seen */
@@ -305,6 +320,14 @@ echotalk *echotalk_create(const char *loader_path, const char *obj_path,
     et->word_delay = 0;
     et->repeat_filter = 99;  /* high enough never to trigger */
     et->chunk_size = DEFAULT_CHUNK;
+    /* Textalker's own startup modes. Word mode is measured -- a bare
+     * letter is spoken as a word. Some-punctuation is an assumption
+     * rather than a measurement: a bare comma is silent, so it is
+     * certainly not all-punctuation, but "some" versus "none" has not
+     * been told apart. It is what this code has always restored to, so
+     * recording it here changes nothing. */
+    et->letter_mode = 0;
+    et->punctuation = 1;
     et->settings_dirty = 1;  /* push defaults before the first utterance */
 
     g_active = et;
@@ -358,6 +381,29 @@ int echotalk_set_pitch(echotalk *et, int p) {
     if (p < 0 || p > 63) return -1;
     et->pitch = p; et->settings_dirty = 1; return 0;
 }
+int echotalk_set_flat(echotalk *et, int flat) {
+    if (flat != 0 && flat != 1) return -1;
+    et->flat = flat; et->settings_dirty = 1; return 0;
+}
+/* These two are pushed only once a caller has actually chosen them --
+ * see modes_chosen. Sending them unconditionally would assert this
+ * code's guess at Textalker's startup punctuation mode as though it
+ * were measured, and would change the byte stream every instance emits
+ * before its first word. */
+int echotalk_set_letter_mode(echotalk *et, int letter) {
+    if (letter != 0 && letter != 1) return -1;
+    et->letter_mode = letter;
+    et->modes_chosen = 1;
+    et->settings_dirty = 1;
+    return 0;
+}
+int echotalk_set_punctuation(echotalk *et, int mode) {
+    if (mode < 0 || mode > 2) return -1;
+    et->punctuation = mode;
+    et->modes_chosen = 1;
+    et->settings_dirty = 1;
+    return 0;
+}
 int echotalk_set_volume(echotalk *et, int v) {
     if (v < 0 || v > 15) return -1;
     et->volume = v; et->settings_dirty = 1; return 0;
@@ -393,10 +439,34 @@ int echotalk_set_raw(echotalk *et, int raw) {
 unsigned echotalk_command_errors(const echotalk *et) { return et->cmd_errors; }
 void echotalk_clear_command_errors(echotalk *et) { et->cmd_errors = 0; }
 
+/* --- reading settings back ------------------------------------------
+ *
+ * Every one of these returns a value its matching setter accepts, so a
+ * voice can be carried from one instance to another by reading here and
+ * writing there. That round trip is the whole point: switching Textalker
+ * version means a fresh 6502 and a fresh Textalker at ITS defaults, and
+ * the only way to restore the voice is to know what it was. */
+int      echotalk_pitch(const echotalk *et)        { return et->pitch; }
+int      echotalk_flat(const echotalk *et)         { return et->flat; }
+int      echotalk_volume(const echotalk *et)       { return et->volume; }
+int      echotalk_word_delay(const echotalk *et)   { return et->word_delay; }
+int      echotalk_repeat_filter(const echotalk *et){ return et->repeat_filter; }
+int      echotalk_compressed(const echotalk *et)   { return et->compressed; }
+int      echotalk_letter_mode(const echotalk *et)  { return et->letter_mode; }
+int      echotalk_punctuation(const echotalk *et)  { return et->punctuation; }
+int      echotalk_frame_rate(const echotalk *et)   { return et->frame_rate; }
+double   echotalk_clock_multiplier(const echotalk *et) { return et->clock_mult; }
+unsigned echotalk_sample_rate(const echotalk *et)  { return et->out_rate; }
+int      echotalk_raw(const echotalk *et)          { return et->raw; }
+
 static void apply_settings(echotalk *et) {
     char cmd[16];
     if (!et->settings_dirty) return;
-    snprintf(cmd, sizeof cmd, "\x05%dP", et->pitch);         send_string(et, cmd);
+    /* P or F is the same setting: pitch with intonation, or pitch
+     * monotone. Sending "%dP" unconditionally, as this used to, threw
+     * away any flatness the text had asked for. */
+    snprintf(cmd, sizeof cmd, "\x05%d%c", et->pitch, et->flat ? 'F' : 'P');
+    send_string(et, cmd);
     snprintf(cmd, sizeof cmd, "\x05%dV", et->volume);        send_string(et, cmd);
     snprintf(cmd, sizeof cmd, "\x05%dD", et->word_delay);    send_string(et, cmd);
     snprintf(cmd, sizeof cmd, "\x05%dR", et->repeat_filter); send_string(et, cmd);
@@ -404,14 +474,81 @@ static void apply_settings(echotalk *et) {
     et->settings_dirty = 0;
 }
 
+/* Watches text on its way to Textalker for Ctrl-E commands, and mirrors
+ * them into the settings above.
+ *
+ * The commands still go through untouched -- Textalker acts on them as
+ * it always did. This only stops the library's idea of the current
+ * voice from drifting away from the real one, which matters for two
+ * reasons: a later settings push would otherwise overwrite whatever the
+ * text had set, and a host cannot carry the voice across to a fresh
+ * instance (switching Textalker version resets the 6502 and everything
+ * in it) unless it can read the current values back.
+ *
+ * Command letters are case-insensitive -- verified: "\x05 10p" and
+ * "\x05 10P" produce identical audio, and both differ from sending
+ * nothing. Sniffing only uppercase would silently miss half of them.
+ *
+ * Values are clamped to the ranges the setters accept, so that anything
+ * a getter reports can be handed straight back to its setter. Textalker
+ * does something of its own with out-of-range values -- "\x05 99P" is
+ * audibly not "\x05 63P" -- so a replay of out-of-spec input is not
+ * bit-exact. That is the deliberate trade: a coherent API over exact
+ * reproduction of input that was out of spec to begin with. */
+static void sniff_ctrl_e(echotalk *et, const char *s, size_t len) {
+    for (size_t i = 0; i + 1 < len; i++) {
+        if ((unsigned char)s[i] != 0x05) continue;
+
+        size_t j = i + 1;
+        int val = 0, has_val = 0;
+        while (j < len && s[j] >= '0' && s[j] <= '9') {
+            if (val < 10000) val = val * 10 + (s[j] - '0');
+            has_val = 1;
+            j++;
+        }
+        if (j >= len) break;
+
+        char c = s[j];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+
+        switch (c) {
+        case 'P':                       /* pitch, normal intonation    */
+            if (has_val) et->pitch = val > 63 ? 63 : val;
+            et->flat = 0;
+            break;
+        case 'F':                       /* the same pitch, monotone    */
+            if (has_val) et->pitch = val > 63 ? 63 : val;
+            et->flat = 1;
+            break;
+        case 'V': if (has_val) et->volume = val > 15 ? 15 : val; break;
+        case 'D': if (has_val) et->word_delay = val > 15 ? 15 : val; break;
+        case 'R': if (has_val) et->repeat_filter = val > 99 ? 99 : val; break;
+        case 'C': et->compressed = 1; break;
+        case 'E': et->compressed = 0; break;
+        case 'L': et->letter_mode = 1; break;
+        case 'W': et->letter_mode = 0; break;
+        case 'A': et->punctuation = 2; break;
+        case 'S': et->punctuation = 1; break;
+        case 'N': et->punctuation = 0; break;
+        default: break;                 /* T, and anything unknown     */
+        }
+        i = j;
+    }
+}
+
 /* Sends one utterance and the CR that makes Textalker speak it.
  *
  * A single character on its own is almost always meant as a character
  * rather than a word -- a letter being reviewed, a punctuation mark
  * being announced -- so it is wrapped in letter mode and
- * all-punctuation, then set back to word mode and some-punctuation.
- * Without this a lone "," is silent and a lone letter can be read as a
- * word or swallowed by the command dispatcher.
+ * all-punctuation, then set back afterwards. Without this a lone "," is
+ * silent and a lone letter can be read as a word or swallowed by the
+ * command dispatcher.
+ *
+ * The restore goes back to the TRACKED modes, not to a fixed pair. This
+ * used to send "\x05S\x05W" unconditionally, which meant a caller who
+ * had chosen all-punctuation or letter mode lost it the first time a
+ * one-character utterance went past.
  *
  * The restore goes BEFORE the CR, not after it. Textalker buffers the
  * whole line and processes it in order when the CR arrives, so a
@@ -426,7 +563,15 @@ static void send_utterance(echotalk *et, const char *s, size_t len) {
     int single = (len == 1);
     if (single) send_string(et, "\x05L\x05" "A");
     for (size_t i = 0; i < len; i++) send_char(et, (uint8_t)s[i]);
-    if (single) send_string(et, "\x05S\x05W");
+    if (single) {
+        char restore[5];
+        restore[0] = 0x05;
+        restore[1] = et->punctuation == 2 ? 'A' : et->punctuation == 0 ? 'N' : 'S';
+        restore[2] = 0x05;
+        restore[3] = et->letter_mode ? 'L' : 'W';
+        restore[4] = 0;
+        send_string(et, restore);
+    }
     send_char(et, '\r');
 }
 
@@ -444,6 +589,12 @@ static void emit_utterance(echotalk *et, const char *s, size_t len) {
      * `start` is taken: the handful of samples that costs then sits
      * outside the trimmed range, which is where it has always sat. */
     apply_settings(et);
+
+    /* Mirror any Ctrl-E commands the caller embedded. Only the caller's
+     * own text is examined, never the wrapper send_utterance() puts
+     * around a single character -- that restores the tracked modes, so
+     * reading it back would be circular. */
+    sniff_ctrl_e(et, s, len);
 
     size_t start = et->count;
 

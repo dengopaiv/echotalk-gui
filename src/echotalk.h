@@ -59,7 +59,7 @@ typedef struct echotalk echotalk;
  * runtime -- which is what a screen reader does -- has no compile-time
  * check available, so it should call echotalk_abi_version() and compare
  * against this before anything else. */
-#define ECHOTALK_ABI_VERSION 2
+#define ECHOTALK_ABI_VERSION 3
 ECHOTALK_API unsigned echotalk_abi_version(void);
 
 /* --- lifecycle --- */
@@ -118,6 +118,33 @@ ECHOTALK_API int echotalk_set_compressed(echotalk *et, int compressed);
 ECHOTALK_API int echotalk_set_pitch(echotalk *et, int pitch);
 ECHOTALK_API int echotalk_set_volume(echotalk *et, int volume);
 
+/* Monotone: 0 (default) speaks with normal intonation, 1 flattens it.
+ *
+ * This is not a separate Textalker setting from the pitch. Its "nP"
+ * command means "pitch n, normal", and "nF" means "pitch n, monotone" --
+ * one setting, two spellings. The two are split here because that is
+ * how a caller thinks about them, and recombined when the command goes
+ * out, so setting one never disturbs the other. */
+ECHOTALK_API int echotalk_set_flat(echotalk *et, int flat);
+
+/* How Textalker reads what it is given.
+ *
+ * letter mode: 0 (default) speaks words, 1 spells them out.
+ * punctuation: 0 none, 1 some (default), 2 all -- at 2 even a line
+ * terminator is announced, as "return".
+ *
+ * These are only sent to Textalker once one of them has been called at
+ * least once. Left alone, the library assumes Textalker's own startup
+ * modes and says nothing about them, because "some" is this code's
+ * assumption rather than a measured fact: a lone comma being silent
+ * rules out all-punctuation, but does not tell "some" from "none".
+ *
+ * A one-character utterance briefly switches both, to get a lone letter
+ * or punctuation mark announced at all, and puts back whatever these
+ * say afterwards -- so a caller's choice survives. */
+ECHOTALK_API int echotalk_set_letter_mode(echotalk *et, int letter);
+ECHOTALK_API int echotalk_set_punctuation(echotalk *et, int mode);
+
 /* Pause Textalker inserts between words, 0-15 (default 0).
  * Textalker 1.3 does not implement this command at all and silently
  * discards it, so it has no effect there. */
@@ -155,6 +182,44 @@ ECHOTALK_API int echotalk_set_raw(echotalk *et, int raw);
  * almost certainly what a screen reader wants. Lower it to get
  * Textalker's original behaviour back. */
 ECHOTALK_API int echotalk_set_repeat_filter(echotalk *et, int threshold);
+
+/* --- reading settings back ---
+ *
+ * The library watches text on its way to Textalker for Ctrl-E commands
+ * and mirrors them here, so these report the voice actually in force
+ * whether it was set through the calls above or by a command embedded
+ * in the text. The commands still reach Textalker untouched; this only
+ * stops the two from drifting apart.
+ *
+ * Every value returned is one its matching setter accepts, so a voice
+ * can be carried across to another instance by reading here and writing
+ * there. That is what makes offering both Textalker versions as voice
+ * variants workable: loading the other version means a fresh 6502 and a
+ * fresh Textalker at ITS defaults, and the only way to restore the
+ * voice is to know what it was.
+ *
+ *     int p = echotalk_pitch(old), v = echotalk_volume(old);
+ *     echotalk_destroy(old);
+ *     echotalk *new = echotalk_create(other_loader, other_obj, e, sizeof e);
+ *     echotalk_set_pitch(new, p); echotalk_set_volume(new, v);
+ *
+ * One limit: Textalker does something of its own with values outside
+ * the documented ranges -- "\x05 99P" is audibly not "\x05 63P" -- and
+ * a sniffed value is clamped to what the setters accept. Replaying
+ * out-of-spec input therefore is not bit-exact. Keeping getter and
+ * setter agreeing was judged worth more. */
+ECHOTALK_API int      echotalk_pitch(const echotalk *et);
+ECHOTALK_API int      echotalk_flat(const echotalk *et);
+ECHOTALK_API int      echotalk_volume(const echotalk *et);
+ECHOTALK_API int      echotalk_word_delay(const echotalk *et);
+ECHOTALK_API int      echotalk_repeat_filter(const echotalk *et);
+ECHOTALK_API int      echotalk_compressed(const echotalk *et);
+ECHOTALK_API int      echotalk_letter_mode(const echotalk *et);
+ECHOTALK_API int      echotalk_punctuation(const echotalk *et);
+ECHOTALK_API int      echotalk_frame_rate(const echotalk *et);
+ECHOTALK_API double   echotalk_clock_multiplier(const echotalk *et);
+ECHOTALK_API unsigned echotalk_sample_rate(const echotalk *et);
+ECHOTALK_API int      echotalk_raw(const echotalk *et);
 
 /* --- speaking --- */
 

@@ -17,7 +17,7 @@ import struct
 import time
 import sys
 
-EXPECTED_ABI = 2
+EXPECTED_ABI = 3
 
 
 class Failures:
@@ -58,6 +58,9 @@ def declare(lib):
                       ("set_word_delay", ctypes.c_int),
                       ("set_chunk_size", ctypes.c_uint),
                       ("set_raw", ctypes.c_int),
+                      ("set_flat", ctypes.c_int),
+                      ("set_letter_mode", ctypes.c_int),
+                      ("set_punctuation", ctypes.c_int),
                       ("set_repeat_filter", ctypes.c_int)]:
         fn = getattr(lib, "echotalk_" + name)
         fn.restype = ctypes.c_int
@@ -65,6 +68,14 @@ def declare(lib):
 
     lib.echotalk_chunk_size.restype = ctypes.c_uint
     lib.echotalk_chunk_size.argtypes = [p]
+    for name in ("pitch", "flat", "volume", "word_delay", "repeat_filter",
+                 "compressed", "letter_mode", "punctuation", "frame_rate", "raw"):
+        fn = getattr(lib, "echotalk_" + name)
+        fn.restype, fn.argtypes = ctypes.c_int, [p]
+    lib.echotalk_clock_multiplier.restype = ctypes.c_double
+    lib.echotalk_clock_multiplier.argtypes = [p]
+    lib.echotalk_sample_rate.restype = ctypes.c_uint
+    lib.echotalk_sample_rate.argtypes = [p]
     lib.echotalk_speak.restype = ctypes.c_int
     lib.echotalk_speak.argtypes = [p, ctypes.c_char_p]
     lib.echotalk_read.restype = ctypes.c_size_t
@@ -310,6 +321,85 @@ def main():
                           lib.echotalk_speak(et, b"Hi.\x04I"),
                           drain(lib, et),
                           lib.echotalk_command_errors(et))[-1])() == 1)
+
+        # --- Ctrl-E commands in the text must update the settings ---
+        #
+        # Otherwise the library's idea of the voice drifts away from
+        # Textalker's, the next settings push silently undoes whatever
+        # the text asked for, and a host cannot carry the voice to a
+        # fresh instance because it cannot read the current values.
+        def state():
+            return {n: getattr(lib, "echotalk_" + n)(et) for n in
+                    ("pitch", "flat", "volume", "word_delay", "repeat_filter",
+                     "compressed", "letter_mode", "punctuation")}
+
+        lib.echotalk_set_pitch(et, 24)
+        lib.echotalk_set_volume(et, 12)
+        lib.echotalk_set_flat(et, 0)
+        drain(lib, et)
+        speak(lib, et, "48PHello.")
+        f.check("Ctrl-E nP is mirrored", state()["pitch"] == 48,
+                str(state()["pitch"]))
+        speak(lib, et, "40FHello.")
+        f.check("Ctrl-E nF sets pitch AND monotone",
+                state()["pitch"] == 40 and state()["flat"] == 1, str(state()))
+        speak(lib, et, "12pHello.")
+        f.check("command letters are case-insensitive",
+                state()["pitch"] == 12 and state()["flat"] == 0, str(state()))
+        speak(lib, et, "3V10D2RCHi.")
+        st = state()
+        f.check("Ctrl-E V/D/R/C are mirrored",
+                (st["volume"], st["word_delay"], st["repeat_filter"],
+                 st["compressed"]) == (3, 10, 2, 1), str(st))
+        speak(lib, et, "99PHi.")
+        f.check("out-of-range Ctrl-E value is clamped to the setter's range",
+                state()["pitch"] == 63, str(state()["pitch"]))
+        f.check("every getter value is accepted by its setter",
+                all(getattr(lib, "echotalk_set_" + n)(et, v) == 0
+                    for n, v in state().items()))
+
+        # Flatness set from the text must survive a settings push. This
+        # is the regression the mirroring exists to prevent: apply_settings
+        # used to send "%dP" unconditionally and un-flatten the voice.
+        #
+        # Both renderings below are made with the settings dirty on entry
+        # and no Ctrl-E in the text, so each carries an identical settings
+        # block. Comparing a call that has one against a call that does
+        # not would compare the block's untrimmed lead-in rather than the
+        # speech, and they would differ whatever the voice did.
+        SENT = "The quick brown fox."
+        lib.echotalk_set_pitch(et, 40)
+        lib.echotalk_set_flat(et, 1)                 # flat, via the API
+        ref_flat = speak(lib, et, SENT)
+
+        lib.echotalk_set_pitch(et, 24)
+        lib.echotalk_set_flat(et, 0)                 # back to normal
+        ref_normal = speak(lib, et, SENT)
+
+        speak(lib, et, "40FSetting flatness from the text.")
+        lib.echotalk_set_volume(et, lib.echotalk_volume(et))   # marks dirty
+        after_push = speak(lib, et, SENT)
+
+        f.check("flatness set in the text survives a settings push",
+                after_push == ref_flat,
+                "matches the API-set flat rendering" if after_push == ref_flat
+                else "voice was un-flattened by the push")
+        f.check("...and the flat and normal renderings really do differ",
+                ref_flat != ref_normal)
+        lib.echotalk_set_pitch(et, 24)
+        lib.echotalk_set_flat(et, 0)
+
+        # A one-character utterance must not clobber the caller's modes.
+        speak(lib, et, "A")
+        before = lib.echotalk_punctuation(et)
+        speak(lib, et, "x")
+        f.check("single character preserves punctuation mode",
+                before == 2 and lib.echotalk_punctuation(et) == 2,
+                f"{before} -> {lib.echotalk_punctuation(et)}")
+        lib.echotalk_set_punctuation(et, 1)
+        lib.echotalk_set_letter_mode(et, 0)
+        lib.echotalk_set_compressed(et, 0)
+        drain(lib, et)
 
         # --- stop() abandons pending text, not just queued audio ---
         lib.echotalk_speak(et, long_text.encode())

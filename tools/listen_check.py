@@ -68,6 +68,9 @@ def declare(lib):
                       ("set_word_delay", ctypes.c_int),
                       ("set_chunk_size", ctypes.c_uint),
                       ("set_raw", ctypes.c_int),
+                      ("set_flat", ctypes.c_int),
+                      ("set_letter_mode", ctypes.c_int),
+                      ("set_punctuation", ctypes.c_int),
                       ("set_repeat_filter", ctypes.c_int)]:
         fn = getattr(lib, "echotalk_" + name)
         fn.restype, fn.argtypes = ctypes.c_int, [p, arg]
@@ -84,6 +87,10 @@ def declare(lib):
     lib.echotalk_next_index.argtypes = [p, ctypes.POINTER(ctypes.c_int)]
     lib.echotalk_chunk_size.restype = ctypes.c_uint
     lib.echotalk_chunk_size.argtypes = [p]
+    for name in ("pitch", "flat", "volume", "word_delay", "repeat_filter",
+                 "compressed", "letter_mode", "punctuation", "frame_rate", "raw"):
+        fn = getattr(lib, "echotalk_" + name)
+        fn.restype, fn.argtypes = ctypes.c_int, [p]
     lib.echotalk_command_errors.restype = ctypes.c_uint
     lib.echotalk_command_errors.argtypes = [p]
     lib.echotalk_clear_command_errors.restype = None
@@ -132,6 +139,9 @@ class Talker:
         lib.echotalk_set_compressed(et, 0)
         lib.echotalk_set_chunk_size(et, 80)
         lib.echotalk_set_raw(et, 0)
+        lib.echotalk_set_flat(et, 0)
+        lib.echotalk_set_letter_mode(et, 0)
+        lib.echotalk_set_punctuation(et, 1)
 
 
 def wav_write(path, rate, pcm):
@@ -167,7 +177,7 @@ def main():
     r = Report()
 
     abi = lib.echotalk_abi_version()
-    r.check("ABI version is 2", abi == 2, f"got {abi}")
+    r.check("ABI version is 3", abi == 3, f"got {abi}")
 
     err = ctypes.create_string_buffer(256)
     et = lib.echotalk_create(loader.encode(), obj.encode(), err, len(err))
@@ -284,7 +294,34 @@ def main():
                 f"{comp} vs {plain_len} samples")
 
         # 10 ----------------------------------------------------------
-        t.say("Section ten. This is the end of the test. "
+        t.say("Section ten. Monotone. The next sentence is spoken flat, "
+              "with the pitch held still, and the one after it goes back "
+              "to normal intonation.")
+        SENT = "The quick brown fox jumps over the lazy dog."
+        p0 = len(t.pcm)
+        lib.echotalk_set_flat(et, 1)
+        flat_n = t.say(SENT)
+        p1 = len(t.pcm)
+        lib.echotalk_set_flat(et, 0)
+        normal_n = t.say(SENT)
+        # Monotone changes the pitch contour, not the timing, so compare
+        # the samples rather than the counts -- the counts are supposed
+        # to match, and did on the first run of this check.
+        r.check("monotone changes the voice but not its duration",
+                bytes(t.pcm[p0:p1]) != bytes(t.pcm[p1:]) and flat_n == normal_n,
+                f"{flat_n} vs {normal_n} samples, audio differs")
+        t.gap()
+
+        # A Ctrl-E command embedded in the text must be mirrored into the
+        # library's own settings, or the two drift apart.
+        t.say("36PThis pitch was set by a command inside the text.")
+        r.check("Ctrl-E in the text updates the library's settings",
+                lib.echotalk_pitch(et) == 36, f"pitch reads {lib.echotalk_pitch(et)}")
+        t.reset()
+        t.gap()
+
+        # 11 ----------------------------------------------------------
+        t.say("Section eleven. This is the end of the test. "
               "If every section did what it said, the library works.")
 
         # --- checks with no audible component -------------------------

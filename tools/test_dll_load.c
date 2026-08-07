@@ -45,6 +45,8 @@ typedef unsigned (*fn_get_uint)(const void *);
 typedef size_t (*fn_get_size)(const void *);
 typedef size_t (*fn_synth)(void *, size_t);
 typedef int   (*fn_next_index)(void *, int *);
+typedef int   (*fn_get_int)(const void *);
+typedef double (*fn_get_dbl)(const void *);
 typedef void  (*fn_clear)(void *);
 
 static HMODULE lib;
@@ -120,12 +122,27 @@ int main(int argc, char **argv) {
     fn_get_size   pending = (fn_get_size)sym("echotalk_pending");
     fn_synth      synth   = (fn_synth)sym("echotalk_synthesize");
     fn_next_index nextidx = (fn_next_index)sym("echotalk_next_index");
+    fn_set_int    setflat = (fn_set_int)sym("echotalk_set_flat");
+    fn_set_int    setlet  = (fn_set_int)sym("echotalk_set_letter_mode");
+    fn_set_int    setpunc = (fn_set_int)sym("echotalk_set_punctuation");
+    fn_get_int    getpit  = (fn_get_int)sym("echotalk_pitch");
+    fn_get_int    getflat = (fn_get_int)sym("echotalk_flat");
+    fn_get_int    getvol  = (fn_get_int)sym("echotalk_volume");
+    fn_get_int    getdel  = (fn_get_int)sym("echotalk_word_delay");
+    fn_get_int    getrep  = (fn_get_int)sym("echotalk_repeat_filter");
+    fn_get_int    getcmp  = (fn_get_int)sym("echotalk_compressed");
+    fn_get_int    getlet  = (fn_get_int)sym("echotalk_letter_mode");
+    fn_get_int    getpunc = (fn_get_int)sym("echotalk_punctuation");
+    fn_get_int    getfr   = (fn_get_int)sym("echotalk_frame_rate");
+    fn_get_int    getraw  = (fn_get_int)sym("echotalk_raw");
+    fn_get_dbl    getclk  = (fn_get_dbl)sym("echotalk_clock_multiplier");
+    fn_get_uint   gethz   = (fn_get_uint)sym("echotalk_sample_rate");
 
     if (failures) { printf("\n%d export(s) missing\n", failures); return 1; }
-    printf("  ok    all 24 exports resolved\n");
+    printf("  ok    all resolved (%d of the 39 exports are used here)\n", 37);
 
     sprintf(detail, "got %u", abi());
-    check("abi version", abi() == 2, detail);
+    check("abi version", abi() == 3, detail);
 
     char err[256] = {0};
     void *et = create(argv[2], argv[3], err, sizeof err);
@@ -219,6 +236,61 @@ int main(int argc, char **argv) {
             g_nmarks ? g_mark_pos[g_nmarks - 1] : (size_t)0, idx_total);
     check("last mark lands at the end of the audio",
           g_nmarks == 3 && g_mark_pos[2] == idx_total, detail);
+
+    /* --- Ctrl-E commands in the text must update the settings ---
+     *
+     * Without this the library's idea of the voice drifts from
+     * Textalker's, and a host cannot carry a voice to a fresh instance
+     * because it cannot read the current values back. */
+    setrate(et, 0); setpit(et, 24); setflat(et, 0); setvol(et, 12);
+    setdel(et, 0); setrep(et, 99); setcmp(et, 0);
+    setlet(et, 0); setpunc(et, 1);
+    say(et, "" "0R" "" "48PHello.");
+    drain(et, rd, nextidx);
+    sprintf(detail, "pitch %d", getpit(et));
+    check("Ctrl-E nP is mirrored", getpit(et) == 48, detail);
+
+    say(et, "" "40FHello.");
+    drain(et, rd, nextidx);
+    sprintf(detail, "pitch %d flat %d", getpit(et), getflat(et));
+    check("Ctrl-E nF sets pitch AND monotone",
+          getpit(et) == 40 && getflat(et) == 1, detail);
+
+    say(et, "" "12pHello.");         /* lowercase */
+    drain(et, rd, nextidx);
+    sprintf(detail, "pitch %d flat %d", getpit(et), getflat(et));
+    check("command letters are case-insensitive",
+          getpit(et) == 12 && getflat(et) == 0, detail);
+
+    say(et, "" "3V" "" "10D" "" "2R" "" "CHi.");
+    drain(et, rd, nextidx);
+    sprintf(detail, "V%d D%d R%d C%d",
+            getvol(et), getdel(et), getrep(et), getcmp(et));
+    check("Ctrl-E V/D/R/C are mirrored",
+          getvol(et) == 3 && getdel(et) == 10 && getrep(et) == 2 &&
+          getcmp(et) == 1, detail);
+
+    say(et, "" "99PHi.");
+    drain(et, rd, nextidx);
+    sprintf(detail, "pitch %d", getpit(et));
+    check("out-of-range Ctrl-E value is clamped", getpit(et) == 63, detail);
+
+    check("every getter value is accepted by its setter",
+          setpit(et, getpit(et)) == 0 && setflat(et, getflat(et)) == 0 &&
+          setvol(et, getvol(et)) == 0 && setdel(et, getdel(et)) == 0 &&
+          setrep(et, getrep(et)) == 0 && setcmp(et, getcmp(et)) == 0 &&
+          setlet(et, getlet(et)) == 0 && setpunc(et, getpunc(et)) == 0 &&
+          setrate(et, getfr(et)) == 0 && setraw(et, getraw(et)) == 0 &&
+          setclk(et, getclk(et)) == 0 && sethz(et, gethz(et)) == 0, "");
+
+    /* A one-character utterance must not clobber the caller's modes. */
+    setpunc(et, 2);
+    say(et, "x");
+    drain(et, rd, nextidx);
+    sprintf(detail, "punctuation %d", getpunc(et));
+    check("single character preserves punctuation mode", getpunc(et) == 2, detail);
+    setpunc(et, 1); setlet(et, 0); setcmp(et, 0); setrep(et, 99);
+    setdel(et, 0); setvol(et, 12); setpit(et, 24); setflat(et, 0);
 
     /* The session-11 single-character fix, through the ABI. */
     say(et, ",");

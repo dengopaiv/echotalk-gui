@@ -1,9 +1,9 @@
 # EchoTalk project handoff
 
-Last substantially rewritten at the end of session 10, which resolved
-every long-standing open bug; session 11 fixed the single-character
-"return" bug found after that. Read this first; `notes/` holds the
-detailed writeups, referenced from here where relevant.
+Last substantially rewritten during session 11, which finished the
+library: the DLL, streaming, index events, and settings mirroring. Read
+this first; `notes/` holds the detailed writeups, referenced from here
+where relevant.
 
 ## Read this first: who you're working with
 
@@ -28,12 +28,25 @@ for use as an NVDA speech backend. It ships as a real 6502 emulation of
 Textalker driving a ported TMS5220, with no dependency on Apple ROM or
 DOS code.
 
-## Current state: emulation correct, library working, DLL not packaged
+## Current state: everything the NVDA backend needs is in place
 
-Speech is validated against real hardware and against MAME. **All
-previously open bugs are fixed**, and **the library now exists** --
-`src/echotalk.[ch]`, driven by `tools/say.c`. What is not done is the
-DLL export surface, streaming output, and NVDA index events.
+Speech is validated against real hardware and against MAME, and **there
+are no open bugs**. The library is `src/echotalk.[ch]`, driven by
+`tools/say.c`. It builds as a Windows DLL and a Linux `.so`, it streams,
+it reports exact index events, and it mirrors Ctrl-E commands into its
+own settings so a voice can be read back and carried elsewhere.
+
+Session 11, in order:
+
+- The single-character "return" bug, found by ear after the library was
+  written. `notes/single_char_return_bug_fixed.md`
+- Ctrl-D driver commands embedded in the text stream.
+  `notes/ctrl_d_driver_commands.md`
+- DLL packaging, 32- and 64-bit. `notes/dll_packaging.md`
+- Pull-driven streaming and index events.
+  `notes/streaming_and_indexing.md`
+- Ctrl-E settings mirroring and read-back.
+  `notes/settings_mirroring.md`
 
 Fixed in session 10, in order:
 
@@ -148,8 +161,37 @@ while ((n = echotalk_read(et, buf, 1024)) > 0) { /* 16-bit mono PCM */ }
 
 Plus `echotalk_set_pitch` (0-63), `_volume` (0-15), `_word_delay`
 (0-15, **no effect under v1.3**, which never implemented that command),
-`_repeat_filter` (0-99, default 99 so it never triggers), `_chunk_size`
-(0 disables chunking) and `_raw`.
+`_repeat_filter` (0-99, default 99 so it never triggers), `_flat`
+(monotone), `_letter_mode`, `_punctuation`, `_chunk_size` (0 disables
+chunking) and `_raw`.
+
+### Settings are mirrored, and readable back
+
+Ctrl-E commands embedded in text still reach Textalker untouched, but
+the library now also watches them go past and updates its own variables
+-- `notes/settings_mirroring.md`. Twelve getters (`echotalk_pitch()`,
+`_flat()`, `_volume()`, ...) report the voice actually in force however
+it was set.
+
+That exists so a voice can be carried to a fresh instance, which is what
+offering both Textalker versions as voice variants needs: switching
+version means a new 6502 and a Textalker back at its own defaults.
+Read from the old instance, write to the new one. Every value a getter
+returns is accepted by its matching setter.
+
+**`nP` and `nF` are one Textalker setting, not two.** `nP` sets the
+pitch and normal intonation; `nF` sets the same pitch and monotone.
+There is no separate "flatness value" and no default for one. The
+library splits them into pitch and flat and recombines them on the way
+out -- before it did that, `apply_settings` sent `%dP` unconditionally
+and silently un-flattened any voice the text had flattened.
+
+Two things measured while building it: **command letters are
+case-insensitive** (` 10p` and ` 10P` give identical audio), and
+**pitch does not saturate at 63** (` 99P` is audibly not
+` 63P`). Sniffed values are clamped to the setters' ranges anyway,
+so replaying out-of-spec input is not bit-exact -- a deliberate trade
+for getter and setter always agreeing.
 
 ### Ctrl-D driver commands
 
@@ -335,9 +377,9 @@ with `objdump -p echotalk.dll | grep 'DLL Name'` after touching the link
 line; the failure mode is a DLL that works here and not on a user's
 machine.
 
-`echotalk_abi_version()` returns 1. A host loading at runtime has no
-compile-time check available, so bump it whenever the surface changes in
-a way a caller could notice.
+`echotalk_abi_version()` returns **3**, over 39 exports. A host loading
+at runtime has no compile-time check available, so bump it whenever the
+surface changes in a way a caller could notice.
 
 Two test programs, and both are needed:
 
@@ -379,6 +421,22 @@ The only figures that legitimately differ are wall-clock: synthesis
 measured 155x real time here and 91x on Jayson's Linux box. Both have
 ample headroom for inline synthesis; treat the "~136x" quoted elsewhere
 as the order of magnitude rather than a constant.
+
+### What has NOT been tested
+
+Everything so far is **x86**. Jayson has no ARM hardware and no 32-bit
+machine, so:
+
+- **ARM (including Apple Silicon and the Raspberry Pi) is entirely
+  untried.** Nothing in the sources is x86-specific, but the
+  bit-identical result above was between two x86 builds and says nothing
+  about a different architecture. Worth re-running `make listen` and
+  comparing MD5s the first time anyone has an ARM box, since that is
+  where a floating-point difference would actually be plausible.
+- **The 32-bit build has never run on 32-bit hardware.** It is exercised
+  by `make test-dll-load`, which runs the real 32-bit binary against the
+  real 32-bit DLL -- but under WoW64 on 64-bit Windows. That covers the
+  code being 32-bit; it does not cover a genuinely 32-bit machine.
 
 ## Streaming and index events
 

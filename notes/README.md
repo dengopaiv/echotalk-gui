@@ -58,6 +58,11 @@ authoritative**, not the numbers here.
   events. Why the session-6 worker-thread design was dropped (synthesis
   runs at ~136x real time), and why index marks being Ctrl-D commands
   makes their offsets free.
+- `settings_mirroring.md` — watching Ctrl-E commands go past and
+  updating the library's own variables, so a voice can be read back and
+  carried to a fresh instance. Records that `nP` and `nF` are one
+  setting with two spellings, that command letters are case-insensitive,
+  and a wrong model I was talked out of before it cost anything.
 
 ## Superseded, kept for the reasoning only
 
