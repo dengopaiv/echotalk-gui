@@ -434,8 +434,6 @@ def main():
 		synth.rate = 0          # slowest: 0.25x
 		synth.worddelay = 100   # and the longest inter-word pause
 		synth._player.feedDelay = 0.02     # make "playback" take real time
-		synth._player.stopped = 0
-		synth._player.feedsAfterStop = 0
 		synthDoneSpeaking.events.clear()
 		synth.speak(["This is a deliberately slow and long utterance that will be "
 			"cancelled partway through, to check that nothing is fed afterwards."])
@@ -443,13 +441,18 @@ def main():
 		t0 = time.perf_counter()
 		synth.cancel()
 		cancelMs = (time.perf_counter() - t0) * 1000
-		time.sleep(0.5)         # give any stale feed time to appear
+		# A feed arriving in this window belongs to speech that was
+		# cancelled. Counting "feeds since the first ever stop" instead
+		# would count every legitimate feed thereafter, which is what an
+		# earlier version of this check did -- and it passed only because
+		# the run happened to be short.
+		feedsAtCancel = synth._player.feeds
+		time.sleep(0.5)
+		staleFeeds = synth._player.feeds - feedsAtCancel
 		f.check("cancel returns promptly even at the slowest settings",
 			cancelMs < 150, f"{cancelMs:.0f} ms")
-		f.check("no audio is fed after a cancel",
-			synth._player.feedsAfterStop == 0,
-			f"{synth._player.feedsAfterStop} stale feed(s) of "
-			f"{synth._player.feeds} total")
+		f.check("no audio is fed after a cancel", staleFeeds == 0,
+			f"{staleFeeds} stale feed(s)")
 		f.check("a cancelled utterance does not report done speaking",
 			not synthDoneSpeaking.events, str(len(synthDoneSpeaking.events)))
 		synth._player.feedDelay = 0.0
@@ -462,17 +465,16 @@ def main():
 		# rather than one well-timed cancel. Removing the post-read re-check
 		# from the driver makes this fail and the single cancel above pass,
 		# which is why both are here.
-		synth._player.stopped = 0
-		synth._player.feedsAfterStop = 0
+		stale = 0
 		for i in range(24):
 			synth.speak([f"Utterance number {i} which will be interrupted partway."])
 			time.sleep(0.01 + (i % 7) * 0.012)   # land in different phases
 			synth.cancel()
-		time.sleep(0.4)
-		f.check("no stale audio across repeated cancels",
-			synth._player.feedsAfterStop == 0,
-			f"{synth._player.feedsAfterStop} stale feed(s) of "
-			f"{synth._player.feeds} total")
+			after = synth._player.feeds
+			time.sleep(0.12)      # a stale feed would land in this window
+			stale += synth._player.feeds - after
+		f.check("no stale audio across repeated cancels", stale == 0,
+			f"{stale} stale feed(s) of {synth._player.feeds} total")
 		f.check("cancel stops the player", synth._player.stopped > 0)
 
 		pcm += speak_and_wait(["Speech works again after cancelling."], "after cancel")

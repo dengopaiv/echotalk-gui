@@ -34,6 +34,32 @@ extern void step6502(int printRegs);
 #define TRIM_MARGIN      40
 #define DEFAULT_CHUNK    80
 
+/* --- runaway guards ---
+ *
+ * Both of these exist to stop a wild jump or a stuck poll from hanging
+ * the host forever. Neither is a tuning knob, and hitting one is always
+ * a fault: they are sized well above anything Textalker legitimately
+ * needs, and any overrun is counted and reported through
+ * echotalk_overruns().
+ *
+ * STEP_BUDGET was 5,000,000 and was FAR too low, which cost a real bug.
+ * Textalker's per-character work grows with the inter-word delay and
+ * with slower speech -- both make it sit waiting on the chip -- and at
+ * word delay 15 with speed 0.25 a single character needs up to about
+ * 20,000,000 instructions. The old budget cut the 6502 off mid-routine,
+ * leaving a half-finished call stack that the next character was then
+ * entered on top of. Nothing said so; the speech simply came out wrong.
+ * See notes/step_budget_truncation.md.
+ *
+ * 64M is roughly three times the worst case measured across both
+ * Textalker versions at the slowest exposed settings, and costs nothing
+ * in normal use because normal characters finish thousands of times
+ * sooner. It only sets how long a genuine hang takes to give up, which
+ * at roughly 30M emulated instructions per second is about two seconds.
+ */
+#define STEP_BUDGET      64000000
+#define DRAIN_BUDGET     4000000
+
 struct echotalk {
     uint8_t mem[0x10000];
     uint8_t rom_shadow[0x3000];
@@ -73,6 +99,7 @@ struct echotalk {
     size_t chunk_size;          /* 0 = do not chunk */
     int raw;                    /* 1 = skip text preparation */
     unsigned cmd_errors;        /* malformed Ctrl-D commands seen */
+    unsigned overruns;          /* runaway guards tripped -- always a fault */
     int settings_dirty;
 
     /* --- streaming ---
@@ -187,7 +214,13 @@ static int run_to_halt(echotalk *et, uint16_t entry, int max_steps,
 static void send_char(echotalk *et, uint8_t ch) {
     sp = 0xFD;
     a = (uint8_t)(ch | 0x80);
-    run_to_halt(et, et->entry, 5000000, 0x0201);
+    /* Reaching the budget means the 6502 was cut off part-way through
+     * Textalker's routine, so its stack and internal state are left
+     * inconsistent and every character after this one is entered on top
+     * of the wreckage. Count it: this used to happen silently, and the
+     * only symptom was speech that came out wrong. */
+    if (run_to_halt(et, et->entry, STEP_BUDGET, 0x0201) >= STEP_BUDGET)
+        et->overruns++;
 }
 
 static void send_string(echotalk *et, const char *s) {
@@ -447,6 +480,7 @@ int echotalk_set_raw(echotalk *et, int raw) {
 }
 
 unsigned echotalk_command_errors(const echotalk *et) { return et->cmd_errors; }
+unsigned echotalk_overruns(const echotalk *et) { return et->overruns; }
 void echotalk_clear_command_errors(echotalk *et) { et->cmd_errors = 0; }
 
 /* --- reading settings back ------------------------------------------
@@ -612,8 +646,9 @@ static void emit_utterance(echotalk *et, const char *s, size_t len) {
 
     /* Drain what is still in flight before touching the samples. */
     int guard = 0;
-    while (tms5220_talk_status(&et->tms) && guard++ < 500000)
+    while (tms5220_talk_status(&et->tms) && guard++ < DRAIN_BUDGET)
         tick_chip(et, (uint32_t)CYCLES_PER_SAMPLE);
+    if (guard >= DRAIN_BUDGET) et->overruns++;   /* chip never went idle */
 
     /* Trim the dead air at the head of this utterance.
      *

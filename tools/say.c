@@ -133,6 +133,15 @@ int main(int argc, char **argv) {
         fprintf(stderr, "warning: %u malformed or unknown Ctrl-D command%s "
                         "ignored\n", bad, bad == 1 ? "" : "s");
 
+    /* A runaway guard tripping means the 6502 was cut off part-way
+     * through a routine and the speech after it is wrong. This used to
+     * happen in silence, at high word delays and slow speeds, and the
+     * only symptom was speech that came out mangled. */
+    unsigned over = echotalk_overruns(et);
+    if (over)
+        fprintf(stderr, "WARNING: %u emulation overrun%s -- the audio is "
+                        "wrong. Please report this.\n", over, over == 1 ? "" : "s");
+
     /* Chunking off is not just "longer lines" -- Textalker's own line
      * buffer bound is never initialised under this emulation, so its
      * auto-flush point is undefined. Say so, however it got turned off. */

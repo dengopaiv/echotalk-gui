@@ -67,6 +67,10 @@ authoritative**, not the numbers here.
   speech rate, by unlocking the parameter state machine from the audio
   path. Explains why 1.0 is byte-exact by construction, and measures
   that pitch really does stay put.
+- `step_budget_truncation.md` — **the real cause** of speech going wrong
+  at high word delay or slow speed: the 6502 step budget was four times
+  too small and truncated in silence. Solved by a negative result Jayson
+  volunteered. Also why any budget that can truncate must report it.
 - `nvda_cancel_race.md` — three cancellation defects found by testing the
   add-on in real NVDA, and why a flag was the wrong primitive for
   cancellation in the first place. Also a worked example of checking that

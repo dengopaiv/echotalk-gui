@@ -325,6 +325,12 @@ the dead-air trimming; do not treat them as targets.
   flat memory model silently writes "ROM stubs" over Textalker's image.
 - The loader returns with **ROM** selected, so jumping straight at the
   OBJ entry lands in the shadow. Always enter via the trampoline.
+- **The runaway guards are not tuning knobs, and a non-zero
+  `echotalk_overruns()` is always a fault.** `STEP_BUDGET` was 5,000,000
+  and needed to be 20,000,000 at the slowest exposed settings; it
+  truncated speech in complete silence for weeks. It is 64,000,000 now
+  and every overrun is counted and reported.
+  `notes/step_budget_truncation.md`
 - **`echotalk_chunk_text()` stops when the caller's array fills and says
   nothing about the text it never reached.** Callers must loop until the
   line is consumed. `src/echotalk.c` does; `tools/render_common.h` still

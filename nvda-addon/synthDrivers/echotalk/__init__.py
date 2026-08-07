@@ -47,7 +47,7 @@ SAMPLES_PER_READ = 1024
 
 # The ABI this driver was written against. echotalk_abi_version() is the
 # only check available to a host that loads the library at runtime.
-REQUIRED_ABI = 4
+REQUIRED_ABI = 5
 
 # The library's own ranges, which every slider below converts to and from.
 PITCH_MAX = 63          # Textalker nP
@@ -204,6 +204,8 @@ class _EchoTalkDLL:
 		lib.echotalk_next_index.argtypes = [p, ctypes.POINTER(ctypes.c_int)]
 		lib.echotalk_stop.restype = None
 		lib.echotalk_stop.argtypes = [p]
+		lib.echotalk_overruns.restype = ctypes.c_uint
+		lib.echotalk_overruns.argtypes = [p]
 
 		abi = lib.echotalk_abi_version()
 		if abi != REQUIRED_ABI:
@@ -315,6 +317,7 @@ class SynthDriver(SynthDriver):
 		# Bumped by cancel(); work in flight carries the generation it was
 		# started for and abandons itself when the two differ.
 		self._gen = 0
+		self._overruns = 0
 		self._stateLock = threading.Lock()
 		self._openVoice(self._voice)
 
@@ -707,6 +710,17 @@ class SynthDriver(SynthDriver):
 			# 16-bit signed little-endian mono is exactly what WavePlayer
 			# wants, so the bytes go straight through.
 			self._player.feed(data, onDone=onDone if marks else None)
+
+		# A runaway guard tripping means the 6502 was cut off part-way
+		# through a routine and this utterance came out wrong. It says
+		# nothing on its own, so put it in the log -- silence is what made
+		# the original instance of this so hard to pin down.
+		with self._libLock:
+			over = self._lib.echotalk_overruns(self._handle) if self._handle else 0
+		if over > self._overruns:
+			log.error("EchoTalk: emulation overrun (%d total). The speech just "
+				"produced is wrong; please report the settings in use." % over)
+			self._overruns = over
 
 		self._player.idle()
 		# Re-check after idle() as well: it blocks until playback finishes,

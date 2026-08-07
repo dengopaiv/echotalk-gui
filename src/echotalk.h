@@ -59,7 +59,7 @@ typedef struct echotalk echotalk;
  * runtime -- which is what a screen reader does -- has no compile-time
  * check available, so it should call echotalk_abi_version() and compare
  * against this before anything else. */
-#define ECHOTALK_ABI_VERSION 4
+#define ECHOTALK_ABI_VERSION 5
 ECHOTALK_API unsigned echotalk_abi_version(void);
 
 /* --- lifecycle --- */
@@ -305,6 +305,18 @@ ECHOTALK_API int echotalk_speak(echotalk *et, const char *text);
  * call to echotalk_clear_command_errors(). Since bad commands are
  * silently dropped, this is the only way a host can notice a typo. */
 ECHOTALK_API unsigned echotalk_command_errors(const echotalk *et);
+
+/* How many times a runaway guard has tripped.
+ *
+ * NON-ZERO IS ALWAYS A FAULT and the audio for those utterances is
+ * wrong. The guards stop a wild jump or a stuck poll from hanging the
+ * host, and are sized well above anything Textalker legitimately needs;
+ * tripping one means the 6502 was cut off part-way through a routine and
+ * left in a state the next character is then entered on top of.
+ *
+ * This exists because that used to happen in complete silence. A host
+ * should log a non-zero value rather than ignore it. */
+ECHOTALK_API unsigned echotalk_overruns(const echotalk *et);
 ECHOTALK_API void echotalk_clear_command_errors(echotalk *et);
 
 /* Copies up to `frames` samples of 16-bit mono PCM into `out` and

@@ -118,6 +118,7 @@ int main(int argc, char **argv) {
     fn_set_uint   setchk  = (fn_set_uint)sym("echotalk_set_chunk_size");
     fn_get_uint   getchk  = (fn_get_uint)sym("echotalk_chunk_size");
     fn_get_uint   errs    = (fn_get_uint)sym("echotalk_command_errors");
+    fn_get_uint   overrun = (fn_get_uint)sym("echotalk_overruns");
     fn_clear      clrerrs = (fn_clear)sym("echotalk_clear_command_errors");
     fn_get_size   pending = (fn_get_size)sym("echotalk_pending");
     fn_synth      synth   = (fn_synth)sym("echotalk_synthesize");
@@ -141,10 +142,10 @@ int main(int argc, char **argv) {
     fn_get_uint   gethz   = (fn_get_uint)sym("echotalk_sample_rate");
 
     if (failures) { printf("\n%d export(s) missing\n", failures); return 1; }
-    printf("  ok    all 41 exports resolved\n");
+    printf("  ok    all 42 exports resolved\n");
 
     sprintf(detail, "got %u", abi());
-    check("abi version", abi() == 4, detail);
+    check("abi version", abi() == 5, detail);
 
     char err[256] = {0};
     void *et = create(argv[2], argv[3], err, sizeof err);
@@ -238,6 +239,20 @@ int main(int argc, char **argv) {
             g_nmarks ? g_mark_pos[g_nmarks - 1] : (size_t)0, idx_total);
     check("last mark lands at the end of the audio",
           g_nmarks == 3 && g_mark_pos[2] == idx_total, detail);
+
+    /* The settings that make the emulation work hardest: a long
+     * inter-word delay and slow speech both leave Textalker waiting on
+     * the chip, which used to push a character past the 6502 step budget
+     * and truncate the utterance in silence. */
+    check("no overruns at default settings", overrun(et) == 0, "");
+    setdel(et, 15); setspd(et, 0.25);
+    say(et, "The quick brown fox jumps over the lazy dog while the cat "
+            "watches from a wall.");
+    size_t hard = drain(et, rd, nextidx);
+    sprintf(detail, "%u overrun(s), %zu samples", overrun(et), hard);
+    check("no overruns at the slowest speed and longest word delay",
+          overrun(et) == 0 && hard > 300000, detail);
+    setdel(et, 0); setspd(et, 1.0);
 
     /* --- continuous speed: monotonic, and it crosses the ABI as a
      * double like the clock multiplier does. */

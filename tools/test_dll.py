@@ -17,7 +17,7 @@ import struct
 import time
 import sys
 
-EXPECTED_ABI = 4
+EXPECTED_ABI = 5
 
 
 class Failures:
@@ -96,6 +96,8 @@ def declare(lib):
     lib.echotalk_stop.argtypes = [p]
     lib.echotalk_command_errors.restype = ctypes.c_uint
     lib.echotalk_command_errors.argtypes = [p]
+    lib.echotalk_overruns.restype = ctypes.c_uint
+    lib.echotalk_overruns.argtypes = [p]
     lib.echotalk_clear_command_errors.restype = None
     lib.echotalk_clear_command_errors.argtypes = [p]
 
@@ -325,6 +327,30 @@ def main():
                           drain(lib, et),
                           lib.echotalk_command_errors(et))[-1])() == 1)
 
+        # --- the settings that make the emulation work hardest ---
+        #
+        # A long inter-word delay and slow speech both leave Textalker
+        # waiting on the chip, which is what pushes a single character
+        # past the 6502 step budget. That used to truncate the utterance
+        # in silence and leave the CPU mid-routine, so every character
+        # after it ran on a corrupted stack. Nothing reported it.
+        f.check("no overruns at default settings", lib.echotalk_overruns(et) == 0,
+                str(lib.echotalk_overruns(et)))
+        lib.echotalk_set_word_delay(et, 15)
+        lib.echotalk_set_speed(et, 0.25)
+        hard = speak(lib, et, "The quick brown fox jumps over the lazy dog "
+                              "while the cat watches from a wall.")
+        f.check("no overruns at the slowest speed and longest word delay",
+                lib.echotalk_overruns(et) == 0,
+                f"{lib.echotalk_overruns(et)} overrun(s), {len(hard) // 2} samples")
+        # 367302 is what the emulation produces when it is allowed to
+        # finish; the old budget cut it to 115487.
+        f.check("the whole utterance is synthesised, not truncated",
+                len(hard) // 2 > 300000, f"{len(hard) // 2} samples")
+        lib.echotalk_set_word_delay(et, 0)
+        lib.echotalk_set_speed(et, 1.0)
+        drain(lib, et)
+
         # --- continuous speed: faster, monotonic, pitch untouched ---
         lib.echotalk_set_pitch(et, 24)
         lib.echotalk_set_flat(et, 0)
@@ -387,6 +413,19 @@ def main():
         # not would compare the block's untrimmed lead-in rather than the
         # speech, and they would differ whatever the voice did.
         SENT = "The quick brown fox."
+        # Put every setting that reaches Textalker into a known state
+        # first. Without this the comparison depends on whatever the
+        # preceding checks happened to leave behind, and inserting a new
+        # check earlier in the file breaks it -- which is exactly what
+        # happened when the overrun checks above were added.
+        lib.echotalk_set_volume(et, 12)
+        lib.echotalk_set_word_delay(et, 0)
+        lib.echotalk_set_repeat_filter(et, 99)
+        lib.echotalk_set_compressed(et, 0)
+        lib.echotalk_set_speed(et, 1.0)
+        lib.echotalk_set_clock_multiplier(et, 1.0)
+        speak(lib, et, "Settling.")
+
         lib.echotalk_set_pitch(et, 40)
         lib.echotalk_set_flat(et, 1)                 # flat, via the API
         ref_flat = speak(lib, et, SENT)
@@ -399,12 +438,39 @@ def main():
         lib.echotalk_set_volume(et, lib.echotalk_volume(et))   # marks dirty
         after_push = speak(lib, et, SENT)
 
+        # Compare CONTENT, not whole buffers. An utterance can land a
+        # sample either side depending on where the interpolation boundary
+        # falls, and requiring byte equality made this fail on a
+        # one-sample difference while every state getter said flatness had
+        # survived. Asking "is it closer to the flat rendering than to the
+        # normal one" is what the check actually means.
+        def meanDiff(a, b):
+            # Tolerant of a small alignment shift. Sample-wise comparison
+            # of speech is worthless if one buffer starts a sample early:
+            # identical audio then reads as a large difference, which is
+            # what made the first attempt at this check report 2271 for
+            # two renderings that were the same voice.
+            best = float("inf")
+            for shift in range(-3, 4):
+                sa = a[max(0, shift) * 2:]
+                sb = b[max(0, -shift) * 2:]
+                n = min(len(sa), len(sb)) // 2
+                if not n:
+                    continue
+                va = struct.unpack(f"<{n}h", sa[:n * 2])
+                vb = struct.unpack(f"<{n}h", sb[:n * 2])
+                best = min(best, sum(abs(x - y) for x, y in zip(va, vb)) / n)
+            return best
+
+        dFlat = meanDiff(after_push, ref_flat)
+        dNormal = meanDiff(after_push, ref_normal)
         f.check("flatness set in the text survives a settings push",
-                after_push == ref_flat,
-                "matches the API-set flat rendering" if after_push == ref_flat
-                else "voice was un-flattened by the push")
+                dFlat * 10 < dNormal and lib.echotalk_flat(et) == 1,
+                f"mean sample difference {dFlat:.1f} from the flat rendering "
+                f"vs {dNormal:.1f} from the normal one")
         f.check("...and the flat and normal renderings really do differ",
-                ref_flat != ref_normal)
+                meanDiff(ref_flat, ref_normal) > 100,
+                f"{meanDiff(ref_flat, ref_normal):.1f}")
         lib.echotalk_set_pitch(et, 24)
         lib.echotalk_set_flat(et, 0)
 
