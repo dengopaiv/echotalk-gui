@@ -312,7 +312,10 @@ class SynthDriver(SynthDriver):
 		self._voice = self._defaultVoice()
 
 		self._queue = queue.Queue()
-		self._stopping = threading.Event()
+		# Bumped by cancel(); work in flight carries the generation it was
+		# started for and abandons itself when the two differ.
+		self._gen = 0
+		self._stateLock = threading.Lock()
 		self._openVoice(self._voice)
 
 		self._thread = threading.Thread(target=self._synthLoop, daemon=True)
@@ -566,78 +569,148 @@ class SynthDriver(SynthDriver):
 		self._queue.put("".join(parts))
 
 	def cancel(self):
-		self._stopping.set()
+		"""Abandons whatever is in flight. Must return promptly.
+
+		NVDA calls this from its main thread on more or less every
+		keystroke, so it may not wait on anything slow. In particular it
+		does NOT take the library lock: the synthesis thread holds that
+		while it synthesises a whole utterance, which at slow settings is
+		long enough for NVDA to visibly stall. Clearing the library is left
+		to the synthesis thread, which notices the generation change and
+		does it there.
+		"""
+		with self._stateLock:
+			self._gen += 1
+		# Everything already queued belongs to the old generation.
 		try:
 			while True:
 				self._queue.get_nowait()
 		except queue.Empty:
 			pass
-		with self._libLock:
-			if self._handle:
-				# Abandons queued audio, text not yet synthesised, AND index
-				# events still outstanding -- which would otherwise fire
-				# against audio nobody is going to hear.
-				self._lib.echotalk_stop(self._handle)
+		# Discards buffered audio and unblocks a feed in progress. Safe from
+		# any thread and needs no lock of ours.
 		if self._player:
 			self._player.stop()
+		# If the synthesis thread happens not to be busy, clear the library
+		# now so a later utterance does not inherit its leftovers. If it IS
+		# busy, skip it rather than wait -- it will do it itself.
+		if self._libLock.acquire(blocking=False):
+			try:
+				if self._handle:
+					# Abandons queued audio, text not yet synthesised, AND
+					# index events still outstanding, which would otherwise
+					# fire against audio nobody is going to hear.
+					self._lib.echotalk_stop(self._handle)
+			finally:
+				self._libLock.release()
 
 	def pause(self, switch):
 		if self._player:
 			self._player.pause(switch)
 
 	# --- synthesis thread ------------------------------------------------
+	#
+	# Cancellation is a generation counter rather than a flag. A flag has to
+	# be cleared before the next utterance, and there is no safe moment to
+	# do that: a cancel arriving in the gap is lost, and one arriving just
+	# after is applied to the wrong utterance. A counter has no such gap --
+	# work captures the generation it was started for and abandons itself
+	# the moment that number moves.
+
+	def _libStop(self):
+		with self._libLock:
+			if self._handle:
+				self._lib.echotalk_stop(self._handle)
 
 	def _synthLoop(self):
-		buf = (ctypes.c_int16 * SAMPLES_PER_READ)()
-		idx = ctypes.c_int()
 		while True:
 			text = self._queue.get()
 			if text is None:
 				return
+			gen = self._gen
 			try:
-				self._stopping.clear()
-				with self._libLock:
-					if not self._handle:
-						continue
-					self._lib.echotalk_speak(self._handle, text.encode("utf-8"))
-				while not self._stopping.is_set():
-					marks = []
-					data = b""
-					with self._libLock:
-						h = self._handle
-						if not h:
-							break
-						# read() is where synthesis happens -- speak() only
-						# queued the text. At around 100x real time there is
-						# ample headroom to do it on this thread.
-						n = self._lib.echotalk_read(h, buf, SAMPLES_PER_READ)
-						if n:
-							data = ctypes.string_at(buf, n * 2)
-						# Marks whose audio lies inside the block just read.
-						# Drain after EVERY read, including the one returning
-						# 0: a mark at the very end of the text only becomes
-						# ready then, and an end-of-speech marker is exactly
-						# what a host is most likely to put there.
-						while self._lib.echotalk_next_index(h, ctypes.byref(idx)):
-							marks.append(idx.value)
-					if not data:
-						if marks:
-							# Trailing marks fire once the audio really has
-							# played, not when the buffer ran dry.
-							self._player.idle()
-							for m in marks:
-								synthIndexReached.notify(synth=self, index=m)
-						break
-
-					def onDone(fired=marks):
-						for m in fired:
-							synthIndexReached.notify(synth=self, index=m)
-
-					# 16-bit signed little-endian mono is exactly what
-					# WavePlayer wants, so the bytes go straight through.
-					self._player.feed(data, onDone=onDone if marks else None)
-				if not self._stopping.is_set():
-					self._player.idle()
-					synthDoneSpeaking.notify(synth=self)
+				self._speakOne(text, gen)
 			except Exception:
 				log.error("EchoTalk synthesis thread", exc_info=True)
+				# Tell NVDA the utterance is over even though it failed.
+				# Leaving it waiting for a completion that never comes is
+				# how a driver fault turns into a screen reader that has
+				# stopped talking altogether.
+				if gen == self._gen:
+					synthDoneSpeaking.notify(synth=self)
+
+	def _speakOne(self, text, gen):
+		buf = (ctypes.c_int16 * SAMPLES_PER_READ)()
+		idx = ctypes.c_int()
+
+		if gen != self._gen:            # cancelled while it sat in the queue
+			self._libStop()
+			return
+		with self._libLock:
+			if not self._handle:
+				return
+			self._lib.echotalk_speak(self._handle, text.encode("utf-8"))
+
+		while True:
+			if gen != self._gen:
+				self._libStop()
+				return
+
+			marks = []
+			data = b""
+			with self._libLock:
+				h = self._handle
+				if not h:
+					return
+				# read() is where synthesis happens -- speak() only queued
+				# the text. At around 100x real time there is ample headroom
+				# to do it on this thread.
+				n = self._lib.echotalk_read(h, buf, SAMPLES_PER_READ)
+				if n:
+					data = ctypes.string_at(buf, n * 2)
+				# Marks whose audio lies inside the block just read. Drain
+				# after EVERY read, including the one returning 0: a mark at
+				# the very end of the text only becomes ready then, and an
+				# end-of-speech marker is exactly what a host is most likely
+				# to put there.
+				while self._lib.echotalk_next_index(h, ctypes.byref(idx)):
+					marks.append(idx.value)
+
+			# Re-check AFTER the read, and this is the important one.
+			# Synthesising an utterance takes a while, and the check at the
+			# top of the loop is stale by the time it finishes. Feeding here
+			# regardless is what pushed a cancelled utterance's audio into a
+			# player that had just been stopped -- which sounds like the last
+			# thing said repeating itself.
+			if gen != self._gen:
+				self._libStop()
+				return
+
+			if not data:
+				if marks:
+					# Trailing marks fire once the audio really has played,
+					# not when the buffer ran dry.
+					self._player.idle()
+					if gen == self._gen:
+						for m in marks:
+							synthIndexReached.notify(synth=self, index=m)
+				break
+
+			def onDone(fired=marks, g=gen):
+				# A mark belonging to speech that was cancelled must not
+				# report progress through it.
+				if g != self._gen:
+					return
+				for m in fired:
+					synthIndexReached.notify(synth=self, index=m)
+
+			# 16-bit signed little-endian mono is exactly what WavePlayer
+			# wants, so the bytes go straight through.
+			self._player.feed(data, onDone=onDone if marks else None)
+
+		self._player.idle()
+		# Re-check after idle() as well: it blocks until playback finishes,
+		# which for a long utterance is seconds, and a cancel during it means
+		# this utterance did not complete.
+		if gen == self._gen:
+			synthDoneSpeaking.notify(synth=self)

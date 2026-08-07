@@ -136,7 +136,13 @@ class _BaseSynthDriver(metaclass=_AutoPropertyMeta):
 
 
 class WavePlayer:
-	"""Captures what the driver feeds and fires onDone as if it played."""
+	"""Captures what the driver feeds and fires onDone as if it played.
+
+	feed() optionally sleeps, so a test can make playback slow enough to
+	cancel in the middle of it, the way real playback is slow. Every feed
+	is timestamped and tagged with the stop count at the time, so a test
+	can tell whether audio arrived after a cancel.
+	"""
 
 	def __init__(self, channels, samplesPerSec, bitsPerSample, outputDevice=None):
 		self.channels = channels
@@ -145,9 +151,18 @@ class WavePlayer:
 		self.data = bytearray()
 		self.closed = False
 		self.stopped = 0
+		self.feedDelay = 0.0
+		self.feedsAfterStop = 0
+		self.feeds = 0
 
 	def feed(self, data, onDone=None):
+		if self.stopped:
+			self.feedsAfterStop += 1
+		self.feeds += 1
 		self.data += data
+		if self.feedDelay:
+			import time
+			time.sleep(self.feedDelay)
 		if onDone:
 			onDone()
 
@@ -407,9 +422,57 @@ def main():
 		f.check("22 kHz output really is longer", len(hi) > 0, f"{len(hi) // 2} samples")
 		synth.samplerate = "8000"
 
-		# Cancel mid-flight must not leave anything behind.
-		synth.speak(["This should be cancelled before it finishes, so you will not hear it."])
+		# --- cancel while speech is actually in flight ---
+		#
+		# This is the bug Jayson hit: the synthesis thread checked for a
+		# cancel BEFORE synthesising an utterance, then fed the result
+		# afterwards regardless. A cancel landing in between pushed a
+		# cancelled utterance's audio into a player that had just been
+		# stopped, which sounds like the last thing said repeating itself.
+		# Slow settings made the window wide enough to hit reliably.
+		import time
+		synth.rate = 0          # slowest: 0.25x
+		synth.worddelay = 100   # and the longest inter-word pause
+		synth._player.feedDelay = 0.02     # make "playback" take real time
+		synth._player.stopped = 0
+		synth._player.feedsAfterStop = 0
+		synthDoneSpeaking.events.clear()
+		synth.speak(["This is a deliberately slow and long utterance that will be "
+			"cancelled partway through, to check that nothing is fed afterwards."])
+		time.sleep(0.4)         # let it get properly under way
+		t0 = time.perf_counter()
 		synth.cancel()
+		cancelMs = (time.perf_counter() - t0) * 1000
+		time.sleep(0.5)         # give any stale feed time to appear
+		f.check("cancel returns promptly even at the slowest settings",
+			cancelMs < 150, f"{cancelMs:.0f} ms")
+		f.check("no audio is fed after a cancel",
+			synth._player.feedsAfterStop == 0,
+			f"{synth._player.feedsAfterStop} stale feed(s) of "
+			f"{synth._player.feeds} total")
+		f.check("a cancelled utterance does not report done speaking",
+			not synthDoneSpeaking.events, str(len(synthDoneSpeaking.events)))
+		synth._player.feedDelay = 0.0
+		synth.rate = byId["rate"].defaultVal
+		synth.worddelay = 0
+
+		# And repeatedly, the way NVDA cancels on every keystroke. This is
+		# the sensitive one: the stale-feed window opens just after a read
+		# returns, so hitting it takes several attempts at varied phases
+		# rather than one well-timed cancel. Removing the post-read re-check
+		# from the driver makes this fail and the single cancel above pass,
+		# which is why both are here.
+		synth._player.stopped = 0
+		synth._player.feedsAfterStop = 0
+		for i in range(24):
+			synth.speak([f"Utterance number {i} which will be interrupted partway."])
+			time.sleep(0.01 + (i % 7) * 0.012)   # land in different phases
+			synth.cancel()
+		time.sleep(0.4)
+		f.check("no stale audio across repeated cancels",
+			synth._player.feedsAfterStop == 0,
+			f"{synth._player.feedsAfterStop} stale feed(s) of "
+			f"{synth._player.feeds} total")
 		f.check("cancel stops the player", synth._player.stopped > 0)
 
 		pcm += speak_and_wait(["Speech works again after cancelling."], "after cancel")

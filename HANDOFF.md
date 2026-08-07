@@ -524,6 +524,16 @@ Points worth not re-deriving:
   the modules it imports -- including the `_get_x`/`_set_x` to property
   metaclass, which the driver depends on. It catches everything except
   how the settings look in NVDA's own dialogs.
+- **Cancellation is a generation counter, not a flag.** A flag has to be
+  cleared before the next utterance and there is no safe moment to do it:
+  a cancel arriving in the gap is lost, one arriving just after is applied
+  to the wrong utterance. Work captures the generation it was started for
+  and abandons itself when that number moves.
+- **`cancel()` must never take the library lock.** NVDA calls it from its
+  main thread on roughly every keystroke, and the synthesis thread holds
+  that lock while synthesising a whole utterance. Clearing the library is
+  left to the synthesis thread. This was a real freeze, not a theoretical
+  one -- see `notes/nvda_cancel_race.md`.
 
 ## What is left
 

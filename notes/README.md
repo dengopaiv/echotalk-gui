@@ -67,6 +67,10 @@ authoritative**, not the numbers here.
   speech rate, by unlocking the parameter state machine from the audio
   path. Explains why 1.0 is byte-exact by construction, and measures
   that pitch really does stay put.
+- `nvda_cancel_race.md` — three cancellation defects found by testing the
+  add-on in real NVDA, and why a flag was the wrong primitive for
+  cancellation in the first place. Also a worked example of checking that
+  a regression test fails on the broken code.
 - `settings_mirroring.md` — watching Ctrl-E commands go past and
   updating the library's own variables, so a voice can be read back and
   carried to a fresh instance. Records that `nP` and `nF` are one
