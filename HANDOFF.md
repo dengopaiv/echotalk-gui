@@ -207,6 +207,15 @@ observe which character is being spoken.
 | clock multiplier | speed *and* pitch, the sped-up-tape effect |
 | sample rate | neither; output format only |
 
+**The last two are not as independent as that table suggests.** The chip
+produces 8000 x the clock multiplier, so at 1.5 it is really generating
+12000 Hz, and an output rate below that downsamples through a resampler
+with no anti-aliasing filter — the discarded band folds back in instead
+of being removed. A host must treat the output rate as a **floor** and
+raise it to at least `8000 * clock`. The library deliberately does not do
+this itself; `say` and the NVDA driver both do.
+`notes/clock_output_rate_downsampling.md`
+
 Speed works by scaling how fast the chip's parameter state machine walks
 a frame while the lattice filter keeps producing one sample per output
 sample. **Pitch measured at 129.0 Hz from 0.5x to 3.0x**; the clock

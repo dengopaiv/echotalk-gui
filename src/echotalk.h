@@ -93,7 +93,17 @@ ECHOTALK_API const char *echotalk_version(const echotalk *et);
 
 /* Output sample rate in Hz. The chip is native 8000; anything else is
  * resampled by linear interpolation with no anti-aliasing, which keeps
- * the original grit rather than smoothing it. 0 selects native. */
+ * the original grit rather than smoothing it. 0 selects native.
+ *
+ * HOSTS: the clock multiplier below scales what the chip produces, so
+ * the native rate is really 8000 * multiplier -- 12000 at 1.5. Asking
+ * for less than that downsamples, and with no anti-aliasing filter
+ * everything above the new Nyquist folds back into the audible band
+ * rather than being removed. Treat this as a FLOOR and raise it to at
+ * least 8000 * multiplier whenever the clock is above 1.0. The library
+ * does not do it for you: a host may have an output device it cannot
+ * renegotiate, and silently changing the format it asked for would be
+ * worse than the aliasing. `say` and the NVDA driver both enforce it. */
 ECHOTALK_API int echotalk_set_sample_rate(echotalk *et, unsigned hz);
 
 /* Pretends the TMS5220 runs at a different clock. Changes speed and

@@ -63,6 +63,11 @@ DEFAULT_DELAY = 0
 DEFAULT_REPEAT = 99     # high enough that the filter never triggers
 DEFAULT_SAMPLERATE = "8000"
 
+# What the TMS5220 produces at a 1.0 chip clock. The chip clock scales it,
+# which is why the output rate below is treated as a floor -- see
+# _effectiveSamplerate().
+CHIP_HZ = 8000
+
 # Bytes the pipeline would act on rather than speak: Ctrl-D introduces a
 # driver command, Ctrl-E a Textalker command, Ctrl-V phoneme mode. They
 # have to be stripped from anything that came off the screen, or a
@@ -395,8 +400,50 @@ class SynthDriver(SynthDriver):
 		self._applyAll()
 		self._openPlayer()
 
+	def _effectiveSamplerate(self):
+		"""The rate the output actually runs at.
+
+		The chip produces CHIP_HZ * the chip clock, so at a 1.5x clock it
+		is really generating 12 kHz. Asking the library for 8 kHz out then
+		resamples that DOWN -- and the resampler has deliberately no
+		anti-aliasing filter, so everything above the new Nyquist folds
+		back into the audible band instead of being removed. That is real
+		detail the chip generated, thrown away and turned into aliasing
+		noise, for no benefit.
+
+		So the chosen rate is a FLOOR, not a fixed value: it is raised to
+		meet the chip whenever the clock outruns it. The user's own choice
+		is left untouched and takes effect again as soon as the clock comes
+		back down.
+		"""
+		# Rounded the same way the library rounds it, so the comparison is
+		# against the rate it will really declare rather than one either
+		# side of it.
+		native = int(CHIP_HZ * self._clock + 0.5)
+		return max(int(self._samplerate), native)
+
+	def _applySamplerate(self):
+		"""Pushes the effective rate, rebuilding the player if it moved.
+
+		Called for a change to either input: the output rate the user
+		picked, or the chip clock that can override it.
+		"""
+		rate = self._effectiveSamplerate()
+		if self._player is not None and getattr(self._player, "samplesPerSec", None) == rate:
+			return
+		if rate != int(self._samplerate):
+			log.debug("EchoTalk: chip clock %.3fx outruns the %s Hz output "
+				"setting; running at %d Hz to avoid downsampling"
+				% (self._clock, self._samplerate, rate))
+		# The output format is changing, so the player has to be rebuilt.
+		# Stop before touching it: feeding a player that is about to close
+		# is a crash waiting for a slow machine.
+		self.cancel()
+		self._push("set_sample_rate", ctypes.c_uint(rate))
+		self._openPlayer()
+
 	def _openPlayer(self):
-		rate = int(self._samplerate)
+		rate = self._effectiveSamplerate()
 		if self._player is not None:
 			if getattr(self._player, "samplesPerSec", None) == rate:
 				return
@@ -453,7 +500,7 @@ class SynthDriver(SynthDriver):
 			lib.echotalk_set_compressed(h, 1 if self._compressed else 0)
 			lib.echotalk_set_speed(h, self._speed)
 			lib.echotalk_set_clock_multiplier(h, self._clock)
-			lib.echotalk_set_sample_rate(h, int(self._samplerate))
+			lib.echotalk_set_sample_rate(h, self._effectiveSamplerate())
 
 	def _push(self, fname, value):
 		with self._libLock:
@@ -523,6 +570,9 @@ class SynthDriver(SynthDriver):
 	def _set_clock(self, value):
 		self._clock = _toMult(value)
 		self._push("set_clock_multiplier", ctypes.c_double(self._clock))
+		# Raising the clock raises what the chip produces, which may now be
+		# above the output rate the user picked.
+		self._applySamplerate()
 
 	def _get_availableSamplerates(self):
 		return self._sampleRates
@@ -533,13 +583,8 @@ class SynthDriver(SynthDriver):
 	def _set_samplerate(self, value):
 		if value not in self._sampleRates or value == self._samplerate:
 			return
-		# The output format is changing, so the player has to be rebuilt.
-		# Stop before touching it: feeding a player that is about to close
-		# is a crash waiting for a slow machine.
-		self.cancel()
 		self._samplerate = value
-		self._push("set_sample_rate", ctypes.c_uint(int(value)))
-		self._openPlayer()
+		self._applySamplerate()
 
 	def _get_monotone(self):
 		return self._monotone

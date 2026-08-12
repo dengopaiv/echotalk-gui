@@ -192,6 +192,11 @@ class _Log:
 	def debugWarning(self, *a, **k):
 		pass
 
+	# NVDA's logHandler has this; a stub that does not is a missing method
+	# the driver only discovers at runtime, on a user's machine.
+	def debug(self, *a, **k):
+		pass
+
 
 def install_stubs():
 	def mod(name, **attrs):
@@ -330,6 +335,35 @@ def main():
 				if getattr(synth, sid) != once:
 					unstable.append((sid, pct))
 		f.check("all sliders round-trip", not unstable, str(unstable[:5]))
+
+		# The chip clock scales what the chip produces, so the output rate
+		# has to behave as a floor rather than a fixed value. At a 2x clock
+		# the chip really makes 16 kHz, and delivering 8 kHz would resample
+		# that DOWN through a resampler with no anti-aliasing filter, which
+		# folds everything above the new Nyquist back into the audible band.
+		# Reported by a user; no automated check had covered it.
+		synth.samplerate = "8000"
+		synth.clock = 50                        # 1.0x
+		f.check("at a 1.0x clock the chosen rate is used as-is",
+			synth._effectiveSamplerate() == 8000, str(synth._effectiveSamplerate()))
+		synth.clock = 75                        # 2.0x on the logarithmic slider
+		native = int(8000 * synth._clock + 0.5)
+		f.check("a clock outrunning the output rate raises it",
+			synth._effectiveSamplerate() == native,
+			f"{synth._effectiveSamplerate()} vs {native}")
+		f.check("the raised rate reaches the player",
+			synth._player.samplesPerSec == native, str(synth._player.samplesPerSec))
+		f.check("the user's own rate choice is left untouched",
+			synth.samplerate == "8000", synth.samplerate)
+		synth.samplerate = "44100"
+		f.check("a rate already above the chip is not disturbed",
+			synth._effectiveSamplerate() == 44100, str(synth._effectiveSamplerate()))
+		synth.samplerate = "8000"
+		synth.clock = 50                        # back to 1.0x
+		f.check("dropping the clock restores the chosen rate",
+			synth._effectiveSamplerate() == 8000
+			and synth._player.samplesPerSec == 8000,
+			f"{synth._effectiveSamplerate()} / {synth._player.samplesPerSec}")
 
 		# Restore the defaults the test then speaks with.
 		synth.rate = byId["rate"].defaultVal

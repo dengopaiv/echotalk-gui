@@ -43,6 +43,11 @@ out to be wrong and why.
   it.
 - `nvda_cancel_race.md` -- three cancellation defects, and why a flag was
   the wrong primitive for cancellation.
+- `clock_output_rate_downsampling.md` -- a raised chip clock was being
+  downsampled back to the output rate through a resampler with no
+  anti-aliasing filter. Why the output rate has to be a floor, why the
+  fix belongs in the hosts rather than the library, and why every
+  existing check was blind to it.
 - `pacing_fast_start_hack.md` -- **the pacing bug, solved.** A `#define`
   lost in the port from MAME. Explains why the audible symptom looked
   compression-specific when the defect was not.

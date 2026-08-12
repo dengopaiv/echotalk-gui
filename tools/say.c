@@ -60,7 +60,9 @@ int main(int argc, char **argv) {
             "usage: %s [options] <loader.bin> <obj.bin> [text] <out.wav>\n"
             "  --file PATH        read the text from a file instead of the\n"
             "                     command line (omit the text argument)\n"
-            "  --rate HZ          output sample rate (default 8000, native)\n"
+            "  --rate HZ          output sample rate (default 8000, native).\n"
+            "                     A floor: --clock raises it to match the\n"
+            "                     chip rather than downsampling the audio\n"
             "  --clock MULT       TMS5220 clock multiplier, speed and pitch\n"
             "  --speed MULT       0.25-4.0, speed only, pitch unchanged. This\n"
             "                     is the one you probably want.\n"
@@ -119,6 +121,31 @@ int main(int argc, char **argv) {
     if (chunk >= 0 && echotalk_set_chunk_size(et, (unsigned)chunk)) fprintf(stderr, "bad --chunk\n");
     if (raw) echotalk_set_raw(et, 1);
 
+    /* The chip's own output rate moves with the clock multiplier: at 1.5
+     * it really is producing 12000 Hz. Writing that out at 8000 would
+     * resample it DOWN, and the resampler deliberately has no
+     * anti-aliasing filter, so everything above the new Nyquist folds
+     * back into the audible band rather than being removed. That is
+     * detail the chip generated, discarded and turned into aliasing
+     * noise. So --rate is treated as a floor and raised to meet the
+     * chip. Rounded exactly as the library rounds it, so the comparison
+     * is against the rate it will really declare. */
+    {
+        unsigned native = (unsigned)(8000 * clock_mult + 0.5);
+        unsigned asked = echotalk_sample_rate(et);
+        if (native > asked) {
+            if (echotalk_set_sample_rate(et, native))
+                fprintf(stderr, "warning: --clock %g needs a %u Hz output "
+                                "rate and it could not be set; the audio "
+                                "will be downsampled\n", clock_mult, native);
+            else
+                fprintf(stderr, "note: --clock %g makes the chip produce "
+                                "%u Hz, so the output rate is raised from "
+                                "%u to %u to avoid downsampling it\n",
+                        clock_mult, native, asked, native);
+        }
+    }
+
     if (echotalk_speak(et, text) != 0) {
         fprintf(stderr, "echotalk_speak failed\n");
         echotalk_destroy(et);
@@ -157,6 +184,10 @@ int main(int argc, char **argv) {
     size_t cap = 65536, n = 0;
     int16_t *pcm = malloc(cap * sizeof(int16_t)), block[1024];
     size_t got;
+    /* Ask the library rather than recomputing it: --rate may have been
+     * raised above, and everything the library hands back is at this
+     * rate whatever the clock multiplier did to the chip. */
+    unsigned out_rate = echotalk_sample_rate(et);
     while ((got = echotalk_read(et, block, 1024)) > 0) {
         if (n + got > cap) { cap = (n + got) * 2; pcm = realloc(pcm, cap * sizeof(int16_t)); }
         memcpy(pcm + n, block, got * sizeof(int16_t));
@@ -164,7 +195,7 @@ int main(int argc, char **argv) {
         int idx;
         while (echotalk_next_index(et, &idx))
             fprintf(stderr, "index %d reached at sample %zu (%.3f s)\n",
-                    idx, n, (double)n / (rate ? rate : 8000));
+                    idx, n, (double)n / out_rate);
     }
     /* Once more after the final read: a mark at the very end of the text
      * only becomes ready on the read that returns 0, and an end-of-speech
@@ -173,13 +204,27 @@ int main(int argc, char **argv) {
         int idx;
         while (echotalk_next_index(et, &idx))
             fprintf(stderr, "index %d reached at sample %zu (%.3f s)\n",
-                    idx, n, (double)n / (rate ? rate : 8000));
+                    idx, n, (double)n / out_rate);
+    }
+
+    /* A Ctrl-D clock command in the text can raise the chip past the rate
+     * fixed above, and there is no going back and re-resampling by then.
+     * This only sees where the clock ended up, so a run that raised it and
+     * put it back goes unreported -- but the common case, setting it and
+     * leaving it, does not pass in silence. */
+    {
+        double final_clock = echotalk_clock_multiplier(et);
+        unsigned final_native = (unsigned)(8000 * final_clock + 0.5);
+        if (final_native > out_rate)
+            fprintf(stderr, "warning: a Ctrl-D clock command raised the chip "
+                            "to %u Hz, above the %u Hz output rate, so that "
+                            "speech was downsampled. Pass --rate %u.\n",
+                    final_native, out_rate, final_native);
     }
 
     /* The library delivers at the rate it was asked for -- the clock
      * multiplier is already baked into the samples by then, so applying
      * it again here would double it. */
-    unsigned out_rate = rate ? rate : 8000;
     wav_write(outpath, out_rate, pcm, n);
     fprintf(stderr, "%zu samples, %.3f s at %u Hz -> %s\n",
             n, (double)n / out_rate, out_rate, outpath);
