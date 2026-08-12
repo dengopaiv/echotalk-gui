@@ -113,7 +113,7 @@ say64 "Textalker 1.3 Loader.bin" "Textalker 1.3.bin" "Hello there." old.wav
 | `--volume N` | Volume, 0 to 15. Default 12. |
 | `--word-delay N` | Pause between words, 0 to 15. Default 0. |
 | `--repeat-filter N` | 0 to 99, default 99. See below. |
-| `--rate HZ` | Sample rate of the WAV, e.g. `22050`. Default 8000, which is what the real card produced. |
+| `--rate HZ` | Sample rate of the WAV, e.g. `22050`. Default 8000, which is what the real card produced. This is a minimum: `--clock` raises it to match the chip, since writing the file at a lower rate than the chip is producing would throw quality away. `say` says so when it happens. |
 | `--chunk N` | Split long lines every N characters. Default 80. |
 | `--no-chunk` | Never split. Prints a warning; see below. |
 | `--raw` | Send bytes to Textalker untouched, skipping the conversion of modern characters. |
@@ -192,6 +192,11 @@ knowing about:
 - **Long word delays and slow speeds used to mangle the speech.** The
   emulator gave up part-way through a character and said nothing about
   it. Fixed, and it now reports itself if it ever happens again.
+- **`--clock` used to quietly cost you sound quality.** Raising the chip
+  clock raises the rate the chip itself produces, and the WAV was still
+  being written at 8000 — so the extra detail was not just wasted, it
+  came back as noise. `--rate` is now a minimum and gets raised to match
+  the chip, with a note on screen saying so.
 - Ctrl-D driver commands, below, are new.
 
 ## Driver commands, with Ctrl-D
