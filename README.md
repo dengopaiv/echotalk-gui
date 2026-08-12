@@ -49,7 +49,7 @@ instructions, reference baselines, and the facts worth not re-deriving.
 
 ## Quick start
 
-Build with MSYS2 (**not** the Cygwin `gcc` that may be on PATH):
+Build with MSYS2 on Windows, or plain gcc elsewhere:
 
 ```
 make native
@@ -59,7 +59,9 @@ make test-dll      # load it from Python, as NVDA does
 make listen        # a self-narrating WAV to check by ear
 ```
 
-Then, given a Textalker loader and OBJ image, speak through the library:
+Then, given a Textalker loader and OBJ image — see
+[Obtaining the Textalker images](#obtaining-the-textalker-images) below —
+speak through the library:
 
 ```
 say loader.bin obj.bin "Hello." out.wav
@@ -76,6 +78,33 @@ render_text_loader loader.bin obj.bin input.bin out.wav
 Both work with either Textalker version — they read which one they have
 from the loader rather than being told.
 
+## Obtaining the Textalker images
+
+This repository does not include Textalker binaries for legal reasons.
+This appears to be one of those sad situations where nobody seems to know
+who actually owns the intellectual property and could give permission for
+their distribution. However, these files were widely distributed on Apple
+II floppy disks, which are readily available. To obtain them, extract the
+appropriate files from Apple II DOS 3.3 images you already have. If you
+do not have disk images with these files, do the following.
+
+First, download <https://bluegrasspals.com/mameapple.zip> and unzip it. In
+the root folder of that zip is a file called `incorrect.dsk`. Using a tool
+like [CiderPress for Windows](https://a2ciderpress.com), extract
+`Textalker.ram` and `Textalker.obj` from that disk. Put them in this
+repository's empty `roms/` folder, renamed to `textalker.ram.bin` and
+`textalker.obj.bin`. That is Textalker 3.1.3.
+
+Then, from `brlboot.dsk` in the mameapple package's `Disks` folder,
+extract `Textalker.ram` and `Textalker.ram.obj`. Put those in `roms/` too,
+renamed to `textalker_v13.ram.bin` and `textalker_v13.obj.bin`. That is
+Textalker 1.3.
+
+Nothing is keyed to a particular build, so other 3.1.x releases should
+work without being recognised individually — the load address and entry
+point are discovered from the files themselves. Each pair you supply
+becomes a voice, labelled from its own banner.
+
 ## The NVDA add-on
 
 `nvda-addon/` holds a working NVDA speech synthesizer driver. Build the
@@ -87,6 +116,26 @@ clock, output sample rate, monotone and compressed speech.
 `build_addon.sh` is public-safe by default and excludes the proprietary
 Textalker images; `--with-images` bundles them for personal use only. See
 [nvda-addon/README.md](nvda-addon/README.md).
+
+## License
+
+EchoTalk is **BSD 3-Clause**. See [LICENSE](LICENSE). That covers
+everything written for this project: the library in `src/`, the tools in
+`tools/`, the NVDA add-on in `nvda-addon/`, the build system and the
+documentation.
+
+Two things it does not cover, both above:
+
+- **`third_party/`** keeps its own licences, which are compatible — see
+  below and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+- **The Textalker images are not licensed by anyone here.** They are the
+  original commercial software and are neither included nor covered; see
+  "Obtaining the Textalker images" above.
+
+The NVDA add-on is additionally distributed under the **GPL v2**, as NVDA
+add-ons must be. BSD-3-Clause is one-way compatible into the GPL, so the
+same source serves both. The add-on package carries its own copy of the
+GPL in `doc/en/copying`.
 
 ## Third-party code
 
@@ -103,10 +152,9 @@ closed or open distribution provided the notices are kept. See
 - **MAME's `a2echoii`** — BSD-3-Clause, reference only. The Echo II bus
   protocol modelled here comes from it.
 
-`roms/` holds Textalker images extracted from user-supplied disks. Those
-are proprietary Street Electronics / American Printing House for the
-Blind software, covered by none of the above, and are not distributed
-here.
+`roms/` is where the Textalker images you extract yourself go. Those are
+proprietary Street Electronics / American Printing House for the Blind
+software, covered by none of the above, and are not distributed here.
 
 ## How it fits together
 

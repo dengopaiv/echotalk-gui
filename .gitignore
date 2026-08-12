@@ -24,3 +24,8 @@ nvda-addon/*.nvda-addon
 # Add-on documentation: build_addon.sh generates the HTML from the Markdown
 # beside it. The Markdown sources and the GPL text ARE tracked.
 nvda-addon/doc/en/*.html
+
+# Textalker images. Proprietary to Street Electronics / APH and NOT
+# distributable -- see "Obtaining the Textalker images" in README.md. Users
+# extract their own into roms/.
+roms/*.bin

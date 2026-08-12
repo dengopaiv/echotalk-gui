@@ -1,0 +1,25 @@
+# Line endings, settled here rather than left to each cloner's local
+# core.autocrlf. .git/config is never pushed, so this file is the only
+# thing that governs what someone else's checkout looks like.
+
+# LF in the repository AND in the working tree, on every platform. Not
+# just `text=auto`, which would check out CRLF on Windows: everything that
+# reads these files here is MSYS2 -- bash, make, gcc, python -- and bash in
+# particular fails on a CRLF script with "\r: command not found", which
+# points at nothing useful. Keeping one line ending everywhere also means
+# a clone on Windows and a clone on Linux are byte-for-byte the same,
+# which matters to a project whose central claim is that its output is
+# bit-identical across the two.
+* text=auto eol=lf
+
+# Never touched: binary test inputs, Textalker images, and audio. Some of
+# the reference inputs are byte streams that happen to look like text, and
+# a stray line-ending conversion would change what Textalker receives.
+*.bin binary
+*.wav binary
+*.dsk binary
+
+# The GPL text ships to Windows users as a plain file with no extension,
+# and goes into the add-on zip exactly as it sits here. Left byte-for-byte
+# alone so it stays verbatim in every checkout.
+nvda-addon/doc/en/copying -text
