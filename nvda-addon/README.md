@@ -47,13 +47,36 @@ that works and `../notes/` for how it was worked out.
    release also carrying an American Printing House for the Blind
    copyright. Supply your own.
 
-4. Package it:
+4. The user documentation in `doc/en/` needs **pandoc** on PATH, which
+   converts each `.md` there to the `.html` NVDA actually opens. Install
+   it from <https://pandoc.org/> if `pandoc --version` says nothing.
+
+   Without pandoc the build reuses whatever HTML is already there and
+   says so; it refuses to package at all if a file is missing, rather
+   than shipping an add-on whose help menu leads nowhere. `manifest.ini`
+   names `readme.html`, so that one has to exist.
+
+5. Package it:
 
        ./build_addon.sh                # public-safe: no images bundled
        ./build_addon.sh --with-images  # personal build — never distribute
 
-5. Open the resulting `.nvda-addon` on the Windows machine, then choose
+6. Open the resulting `.nvda-addon` on the Windows machine, then choose
    **EchoTalk (emulated Echo II)** in NVDA's synthesizer dialog.
+
+## Documentation
+
+`doc/en/` holds what the user reads, and NVDA opens it from the add-on's
+entry in the Add-on Store or the Tools menu.
+
+| File | |
+|---|---|
+| `readme.md` | The add-on's own README — what it is, what every setting does. Edit this, not the HTML. |
+| `THIRD_PARTY_LICENSES.md` | The notices, in the abbreviated form aimed at someone installing the add-on rather than reading the source. `../THIRD_PARTY_LICENSES.md` in the repo root stays the full version, and is what goes beside the driver as a `.txt`. |
+| `copying` | The GNU GPL v2, verbatim, because an NVDA add-on is distributed under it. Not generated; shipped as-is. |
+
+The `.html` files are build output and are gitignored. The Markdown
+sources are excluded from the package.
 
 ## Testing without installing
 
@@ -78,7 +101,7 @@ catches everything else before an install.
 | Delay between words (Textalker 3 only) | Textalker 1.3 never implemented this command and discards it. |
 | Repeat-character filter | Textalker collapses runs of the same character, so at its original setting `EEEEEEEEE` is spoken as `EE`. Default is high enough that it never triggers. |
 | Chip clock | Over/underclocks the speech chip: speed **and** pitch together, the sped-up-tape effect. Quite different from Rate. |
-| Output sample rate | 8 kHz is what the card produced. Higher rates only resample — they add no detail, and exist because some output devices prefer their own rate. |
+| Output sample rate | 8 kHz is what the card produced. Higher rates only resample — they add no detail, and exist because some output devices prefer their own rate. A **floor, not a fixed value**: the chip clock scales what the chip produces, so this is raised to meet it rather than downsampling. See below. |
 | Monotone | Flattens the intonation. Textalker treats this as part of the pitch setting, not a separate one. |
 | Compressed speech | Textalker's own fast mode, which drops sounds rather than playing faster. |
 
@@ -98,6 +121,22 @@ wrong one:
   pitch move together. Chipmunks.
 - **Compressed** is Textalker's own idea of fast speech, achieved by
   leaving sounds out.
+
+### The output rate is a floor, because the chip clock moves with it
+
+The chip produces 8 kHz × the chip clock, so at 1.5x it is really
+generating 12 kHz. Delivering that as 8 kHz means **downsampling**, and
+the resampler has no anti-aliasing filter by design — everything above
+the new Nyquist folds back into the audible band instead of being
+removed. Detail the chip generated, discarded and turned into noise.
+
+So `_effectiveSamplerate()` raises the rate to meet the chip whenever the
+clock outruns it, and both the library and the `WavePlayer` are opened at
+that rate. The user's own choice is stored untouched and applies again as
+soon as the clock comes back down, so the settings dialog keeps showing
+what they picked.
+
+Reported by a user. `say` enforces the same floor and says so on stderr.
 
 ## Notes
 
@@ -124,8 +163,11 @@ wrong one:
 
 The emulation is public domain (Fake6502) and BSD-3-Clause (MAME's
 TMS5220 and `a2echoii`); `THIRD_PARTY_LICENSES.txt` is placed beside the
-driver by the build script and must stay with it. NVDA is GPL-2 with an
-explicit exception permitting non-GPL synthesizer drivers.
+driver by the build script and must stay with it, and the same notices
+appear in reader-facing form at `doc/en/THIRD_PARTY_LICENSES.html`. The
+add-on itself is distributed under the GPL v2 in `doc/en/copying`. NVDA
+is GPL-2 with an explicit exception permitting non-GPL synthesizer
+drivers.
 
 The Textalker images are covered by none of that and are not distributed
 here.

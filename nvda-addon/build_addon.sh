@@ -16,6 +16,7 @@ WITH_IMAGES=0
 [[ "${1:-}" == "--with-images" ]] && WITH_IMAGES=1
 
 DRV=synthDrivers/echotalk
+DOC=doc/en
 
 for f in "$DRV/echotalk64.dll" "$DRV/echotalk32.dll"; do
     [[ -f "$f" ]] || { echo "missing $f -- see README.md" >&2; exit 1; }
@@ -26,15 +27,51 @@ done
 # redistribution, and Fake6502 asks for credit.
 cp ../THIRD_PARTY_LICENSES.md "$DRV/THIRD_PARTY_LICENSES.txt"
 
+# User documentation. NVDA opens doc/<lang>/<docFileName> from the add-on
+# help menu, and manifest.ini names readme.html, so that file has to exist
+# in the package or the help entry is dead. The HTML is generated from the
+# Markdown beside it; `copying` is the GPL text, shipped verbatim.
+#
+# Pandoc does the conversion when it is on PATH. Without it the previously
+# generated HTML is reused, because a machine that cannot convert can still
+# package what an earlier build produced -- but a missing file is fatal
+# rather than silently shipping an add-on whose help does nothing.
+[[ -f "$DOC/copying" ]] || { echo "missing $DOC/copying (GPL v2 text)" >&2; exit 1; }
+
+if command -v pandoc >/dev/null 2>&1; then
+    for md in "$DOC"/*.md; do
+        html="${md%.md}.html"
+        title="$(basename "${md%.md}")"
+        pandoc --standalone --from markdown --to html5 \
+               --metadata pagetitle="EchoTalk -- $title" \
+               --output "$html" "$md"
+        echo "pandoc: $md -> $html"
+    done
+else
+    echo "pandoc not found on PATH -- reusing the existing generated HTML" >&2
+fi
+
+for md in "$DOC"/*.md; do
+    html="${md%.md}.html"
+    [[ -f "$html" ]] || {
+        echo "missing $html and pandoc is not available to generate it." >&2
+        echo "Install pandoc (https://pandoc.org/) and run this script again." >&2
+        exit 1
+    }
+done
+
 rm -f echotalk.nvda-addon
+# The Markdown sources stay out of the package; only the generated HTML and
+# the GPL text ship.
 if [[ $WITH_IMAGES == 1 ]]; then
     shopt -s nullglob
     images=("$DRV"/*.obj.bin)
     [[ ${#images[@]} -gt 0 ]] || { echo "no Textalker images to bundle" >&2; exit 1; }
-    zip -r -q echotalk.nvda-addon manifest.ini synthDrivers
+    zip -r -q echotalk.nvda-addon manifest.ini synthDrivers doc \
+        -x "$DOC/*.md"
     echo "wrote echotalk.nvda-addon (PRIVATE build: bundles proprietary Textalker images, do not distribute)"
 else
-    zip -r -q echotalk.nvda-addon manifest.ini synthDrivers \
-        -x "$DRV/*.bin"
+    zip -r -q echotalk.nvda-addon manifest.ini synthDrivers doc \
+        -x "$DRV/*.bin" -x "$DOC/*.md"
     echo "wrote echotalk.nvda-addon (public-safe, no Textalker images)"
 fi

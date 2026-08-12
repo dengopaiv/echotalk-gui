@@ -20,3 +20,7 @@ tmp/
 nvda-addon/synthDrivers/echotalk/*.bin
 nvda-addon/synthDrivers/echotalk/THIRD_PARTY_LICENSES.txt
 nvda-addon/*.nvda-addon
+
+# Add-on documentation: build_addon.sh generates the HTML from the Markdown
+# beside it. The Markdown sources and the GPL text ARE tracked.
+nvda-addon/doc/en/*.html
