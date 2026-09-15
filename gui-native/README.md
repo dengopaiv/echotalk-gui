@@ -115,7 +115,16 @@ Run on 2026-09-15 with the images and DLL of the unpacked add-on in
 python tools\verify_gui.py            the exe against the add-on's own DLL
 python tools\verify_gui_keyboard.py   the real window, by keyboard and MSAA
 python tools\verify_gui_smoke.py      Preview/Stop, a Unicode folder, say
+python tools\build_release.py         all of the above from a clean build, then the zip
 ```
+
+`build_release.py` wipes `gui-native\build`, builds, runs the three checks,
+confirms the exe imports only Windows system DLLs, and writes
+`dist\echotalk-gui-<version>-windows-x64.zip`: the GUI, say, README, NOTICE,
+LICENSE, THIRD_PARTY_LICENSES.md, the library README, and an empty `roms\`
+with a note. It **fails and deletes the zip if anything in it could be a
+Textalker image**, then renders from a copy unpacked into an empty folder.
+It passed end to end on 2026-09-15.
 
 - **Against the add-on itself — 114 cases, all byte-identical.**
   `verify_gui.py` holds the add-on driver's speaking path with NVDA removed

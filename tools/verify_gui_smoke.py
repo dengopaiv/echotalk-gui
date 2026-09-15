@@ -58,12 +58,12 @@ try:
     u32.PostMessageW(hwnd, 0x0111, 1047, u32.GetDlgItem(hwnd, 1047))
     time.sleep(1.0)
     buf = ctypes.create_unicode_buffer(512)
-    u32.SendMessageW(u32.GetDlgItem(hwnd, 1054), 0x000D, 512, buf)
+    u32.SendMessageW(u32.GetDlgItem(hwnd, 1056), 0x000D, 512, buf)
     print("after Preview:", buf.value)
     ok1 = buf.value.startswith("Playing:")
     u32.PostMessageW(hwnd, 0x0111, 1048, u32.GetDlgItem(hwnd, 1048))
     time.sleep(0.4)
-    u32.SendMessageW(u32.GetDlgItem(hwnd, 1054), 0x000D, 512, buf)
+    u32.SendMessageW(u32.GetDlgItem(hwnd, 1056), 0x000D, 512, buf)
     print("after Stop:", buf.value)
     ok2 = buf.value == "Stopped."
     voice = u32.GetDlgItem(hwnd, 1009)
@@ -71,7 +71,7 @@ try:
     u32.PostMessageW(hwnd, 0x0111, (1 << 16) | 1009, voice)  # CBN_SELCHANGE
     u32.PostMessageW(hwnd, 0x0111, 1047, u32.GetDlgItem(hwnd, 1047))
     time.sleep(1.0)
-    u32.SendMessageW(u32.GetDlgItem(hwnd, 1054), 0x000D, 512, buf)
+    u32.SendMessageW(u32.GetDlgItem(hwnd, 1056), 0x000D, 512, buf)
     print("after Preview on voice 2:", buf.value)
     ok3 = buf.value.startswith("Playing:")
     alive = proc.poll() is None and u32.IsWindow(hwnd)

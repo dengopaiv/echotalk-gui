@@ -7,7 +7,7 @@ card and **Render to WAV**. It is built the way the Votrax SC-01 ROM GUI,
 Votrax Native, SAM and STSPEECH GUIs already are (1.5).
 
 Written 2026-09-15, before any GUI code existed, and followed the same day.
-Status: **Phases 0–4 built and verified; Phase 5 partly done.** The GUI is
+Status: **Phases 0–5 built and verified; the NVDA listening pass is still to do.** The GUI is
 in [gui-native/](gui-native/README.md); "Progress" at the end of this file
 says what is done, what the building corrected in this plan, and what is
 left. Everything under "Established" below was checked on this machine that
@@ -554,7 +554,7 @@ byte-identical to the render before saving.
 | 2 Window and Render to WAV | done | 30 tab stops, closed ring both ways, 23 distinct accelerators, MSAA names, roles and values; a `rõõm ÄÖÜ ☃` images folder renders |
 | 3 Preview | done, **except the listening pass with NVDA running** | Preview, Stop part-way, Preview on the other voice; window alive, no dialog |
 | 4 Presets and extras | done | derived preset combo checked by keyboard script; preset round trip, batch render and pitch sweep byte-identical to the add-on |
-| 5 Release | partly | README, NOTICE and dependency check done; `build_release.py` and the head-directory inventory line not yet |
+| 5 Release | done | `tools/build_release.py` passes end to end: clean build, all three checks, system-only imports, an 8-file zip with no image files in it, and a render from the unpacked zip. Head-directory inventory updated. |
 
 **What building corrected in this plan:**
 
@@ -579,6 +579,7 @@ byte-identical to the render before saving.
 **Left:**
 
 1. A listening pass with NVDA 2026.1 running, written down in `notes/`.
-2. `tools/build_release.py` (Phase 5 item 2).
-3. The head-directory `README.md` inventory line for `echotalk-gui`.
-4. ARM64 build and parity run, when there is hardware.
+2. ARM64 build and parity run, when there is hardware.
+3. The head directory's `CLAUDE.md` lists the public repositories by name
+   and does not yet include `echotalk-gui`; that file holds the working
+   rules, so it is left for the user to change.
