@@ -29,3 +29,19 @@ nvda-addon/doc/en/*.html
 # distributable -- see "Obtaining the Textalker images" in README.md. Users
 # extract their own into roms/.
 roms/*.bin
+# The same images wherever they land -- beside the GUI exe, in a release
+# staging folder, in a scratch copy -- matched by the names the tools and the
+# driver look for (<stem>.ram.bin / .loader.bin / .obj.bin). The .bin inputs
+# under reference_text/ are plain text and do not match these.
+*.ram.bin
+*.loader.bin
+*.obj.bin
+[Tt]extalker*.bin
+# Everything under roms/ except its README, so a disk image or a renamed
+# copy put there by hand is not picked up either.
+roms/*
+!roms/README.md
+
+# GUI release archives (a release zip is checked for images, but never
+# committed either way)
+dist/

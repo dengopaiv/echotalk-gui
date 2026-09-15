@@ -42,6 +42,9 @@ triple; the TMS5220's own frame rate offers four fixed steps; the clock
 multiplier changes both, for the sped-up-tape character; and the output
 sample rate changes neither.
 
+A native desktop GUI — every setting, preview and WAV export — is planned
+but not yet started; see [ROADMAP.md](ROADMAP.md).
+
 **Start with [HANDOFF.md](HANDOFF.md)** — current state, build and run
 instructions, reference baselines, and the facts worth not re-deriving.
 `notes/` holds the investigation writeups, and
