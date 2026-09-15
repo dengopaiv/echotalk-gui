@@ -97,7 +97,7 @@ starts from the defaults and remembers nothing.
 
 ```
 gui-native\build.cmd            x64 (default)
-gui-native\build.cmd arm64      ARM64, untried
+gui-native\build.cmd arm64      ARM64: cross-builds cleanly on x64; never run
 ```
 
 Needs Visual Studio with "Desktop development with C++". Output:

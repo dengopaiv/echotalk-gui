@@ -579,7 +579,12 @@ byte-identical to the render before saving.
 **Left:**
 
 1. A listening pass with NVDA 2026.1 running, written down in `notes/`.
-2. ARM64 build and parity run, when there is hardware.
+2. An ARM64 parity run, when there is hardware. `build.cmd arm64`
+   cross-compiles and links cleanly on x64 (2026-09-15, `/W4 /WX`,
+   445 KB), but the exe has never run. The reference DLL is x64, so on ARM
+   the comparison has to be against WAVs saved from an x64 run — and ARM
+   is exactly where HANDOFF expects a floating-point difference would show
+   up first.
 3. The head directory's `CLAUDE.md` lists the public repositories by name
    and does not yet include `echotalk-gui`; that file holds the working
    rules, so it is left for the user to change.
