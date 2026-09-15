@@ -69,6 +69,29 @@ def version():
     return ".".join(parts)
 
 
+def carries_images(path):
+    """True if the executable has any resource of type TEXTALKER."""
+    import ctypes
+    import ctypes.wintypes as w
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.LoadLibraryExW.restype = ctypes.c_void_p
+    k.LoadLibraryExW.argtypes = [w.LPCWSTR, ctypes.c_void_p, w.DWORD]
+    k.FreeLibrary.argtypes = [ctypes.c_void_p]
+    names_proc = ctypes.WINFUNCTYPE(w.BOOL, ctypes.c_void_p, ctypes.c_void_p,
+                                    ctypes.c_void_p, ctypes.c_ssize_t)
+    k.EnumResourceNamesW.argtypes = [ctypes.c_void_p, w.LPCWSTR, names_proc, ctypes.c_ssize_t]
+    module = k.LoadLibraryExW(str(path), None, 0x2)   # LOAD_LIBRARY_AS_DATAFILE
+    if not module:
+        fail("could not open %s to inspect its resources" % path)
+    found = []
+    cb = names_proc(lambda *_: found.append(1) or True)
+    try:
+        k.EnumResourceNamesW(module, "TEXTALKER", cb, 0)
+    finally:
+        k.FreeLibrary(module)
+    return bool(found)
+
+
 def find_dumpbin():
     vs = Path(r"C:\Program Files\Microsoft Visual Studio")
     hits = sorted(vs.glob("*/*/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe"))
@@ -137,6 +160,14 @@ def main(argv):
         zpath.unlink()
         fail("the archive contained possible Textalker images and was deleted: %s" % bad)
     print("ok: no .bin, .dsk or disk-image files")
+    # The GUI can carry images as TEXTALKER resources in a private local
+    # build. A file check cannot see those, so look inside the executables.
+    carried = [n for n in (exe, say) if carries_images(n)]
+    if carried:
+        zpath.unlink()
+        fail("an executable carries Textalker images as resources; the archive was "
+             "deleted: %s" % [c.name for c in carried])
+    print("ok: no executable carries Textalker images as resources")
 
     step("6. run from a clean extraction")
     with tempfile.TemporaryDirectory(prefix="echotalk_release_") as tmp:

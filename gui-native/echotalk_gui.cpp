@@ -530,6 +530,143 @@ static std::vector<std::wstring> DefaultRomDirs()
 }
 
 /* --------------------------------------------------------------------- */
+/* Images carried inside the executable                                  */
+/* --------------------------------------------------------------------- */
+
+/*
+ * A build of this program may carry Textalker image pairs as resources of
+ * type TEXTALKER, named by file name ("TEXTALKER.RAM.BIN"). The published
+ * build never does -- the images are proprietary and are not distributed
+ * -- but a private build for one's own machine can, so that nobody has to
+ * find, choose or even see the image files.
+ *
+ * echotalk_create() takes paths, so the resources are written to a folder
+ * of this process's own under %TEMP% at startup and deleted at exit. The
+ * window then hides the ROM folder, Browse and ROM status controls
+ * entirely; everything else behaves as usual.
+ */
+static const wchar_t *IMAGE_RESOURCE_TYPE = L"TEXTALKER";
+static const wchar_t *IMAGE_DIR_PREFIX = L"EchoTalkGUI-";
+static std::wstring g_embeddedDir;   /* non-empty when the images came from resources */
+
+static BOOL CALLBACK CollectImageName(HMODULE, LPCWSTR, LPWSTR name, LONG_PTR param)
+{
+    if (!IS_INTRESOURCE(name)) {
+        ((std::vector<std::wstring> *)param)->push_back(name);
+    }
+    return TRUE;
+}
+
+static std::vector<std::wstring> EmbeddedImageNames()
+{
+    std::vector<std::wstring> names;
+    EnumResourceNamesW(NULL, IMAGE_RESOURCE_TYPE, CollectImageName, (LONG_PTR)&names);
+    return names;
+}
+
+static void DeleteImageDir(const std::wstring &dir)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(JoinPath(dir, L"*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                DeleteFileW(JoinPath(dir, fd.cFileName).c_str());
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir.c_str());
+}
+
+/* Folders left by an earlier run that crashed before it could clean up.
+ * A folder whose process is still running belongs to another open copy of
+ * this program and is left alone -- deleting it would break that copy's
+ * next render. */
+static void DeleteStaleImageDirs(const std::wstring &temp)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(JoinPath(temp, std::wstring(IMAGE_DIR_PREFIX) + L"*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            continue;
+        }
+        DWORD pid = (DWORD)wcstoul(fd.cFileName + wcslen(IMAGE_DIR_PREFIX), NULL, 10);
+        if (pid == GetCurrentProcessId()) {
+            continue;
+        }
+        HANDLE proc = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : NULL;
+        bool alive = proc != NULL && WaitForSingleObject(proc, 0) == WAIT_TIMEOUT;
+        if (proc != NULL) {
+            CloseHandle(proc);
+        }
+        if (!alive) {
+            DeleteImageDir(JoinPath(temp, fd.cFileName));
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+/* Writes the carried images out and returns the folder, or an empty string
+ * when this build carries none. */
+static std::wstring ExtractEmbeddedImages()
+{
+    std::vector<std::wstring> names = EmbeddedImageNames();
+    if (names.empty()) {
+        return std::wstring();
+    }
+    wchar_t tempBuf[MAX_PATH + 1];
+    DWORD n = GetTempPathW(MAX_PATH + 1, tempBuf);
+    if (n == 0 || n > MAX_PATH) {
+        return std::wstring();
+    }
+    std::wstring temp(tempBuf, n);
+    DeleteStaleImageDirs(temp);
+    std::wstring dir = JoinPath(temp, Format(L"%s%lu", IMAGE_DIR_PREFIX, GetCurrentProcessId()));
+    CreateDirectoryW(dir.c_str(), NULL);
+    size_t written = 0;
+    for (std::wstring name : names) {
+        HRSRC res = FindResourceW(NULL, name.c_str(), IMAGE_RESOURCE_TYPE);
+        HGLOBAL data = res != NULL ? LoadResource(NULL, res) : NULL;
+        const unsigned char *bytes = data != NULL ? (const unsigned char *)LockResource(data) : NULL;
+        DWORD size = res != NULL ? SizeofResource(NULL, res) : 0;
+        if (bytes == NULL || size == 0) {
+            continue;
+        }
+        /* rc keeps the quotation marks of a quoted name as part of it
+         * ("\"TEXTALKER.RAM.BIN\"", measured) and upper-cases it. The pair
+         * rule does not care about case, but lower case reads like the
+         * original file names; the quotes would make the name invalid. */
+        if (name.size() >= 2 && name.front() == L'"' && name.back() == L'"') {
+            name = name.substr(1, name.size() - 2);
+        }
+        if (name.empty() || name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) {
+            continue;
+        }
+        std::transform(name.begin(), name.end(), name.begin(), towlower);
+        if (WriteWholeFile(JoinPath(dir, name), std::vector<unsigned char>(bytes, bytes + size))) {
+            written++;
+        }
+    }
+    if (written == 0) {
+        DeleteImageDir(dir);
+        return std::wstring();
+    }
+    return dir;
+}
+
+static void RemoveEmbeddedImages()
+{
+    if (!g_embeddedDir.empty()) {
+        DeleteImageDir(g_embeddedDir);
+        g_embeddedDir.clear();
+    }
+}
+
+/* --------------------------------------------------------------------- */
 /* Synthesis: the add-on's driver, step for step                         */
 /* --------------------------------------------------------------------- */
 
@@ -962,7 +1099,7 @@ static void UpdateReadouts()
 
 static void ReloadVoices(const std::wstring *keepStem)
 {
-    std::wstring dir = Trim(GetText(g_romDir));
+    std::wstring dir = g_romDir != NULL ? Trim(GetText(g_romDir)) : g_embeddedDir;
     std::wstring keep = keepStem != NULL ? *keepStem
                       : (SelectedVoice() != NULL ? SelectedVoice()->stem : std::wstring());
     std::wstring status;
@@ -985,7 +1122,11 @@ static void ReloadVoices(const std::wstring *keepStem)
                          L"the Textalker images\" in the README. They are not "
                          L"included with this program.", dir.c_str());
     }
-    SetWindowTextW(g_romStatus, status.c_str());
+    if (g_romStatus != NULL) {
+        SetWindowTextW(g_romStatus, status.c_str());
+    } else if (g_voices.empty()) {
+        SetResult(L"The Textalker images built into this program could not be started.");
+    }
     if (sel >= 0) {
         SetCombo(g_voice, sel);
     }
@@ -1552,7 +1693,15 @@ static std::wstring SayCommandLine(const Settings &s, const VoicePair *v)
     else if (s.chunk != 80) c += Format(L" --chunk %d", s.chunk);
     if (s.raw) c += L" --raw";
     c += L" --file text.txt ";
-    c += v != NULL ? Quote(v->loader) + L" " + Quote(v->obj) : std::wstring(L"LOADER.bin OBJ.bin");
+    if (v == NULL) {
+        c += L"LOADER.bin OBJ.bin";
+    } else if (!g_embeddedDir.empty()) {
+        /* The extracted copies vanish when this program closes, so name
+         * the files rather than point at a folder that will not exist. */
+        c += Quote(v->stem + L".ram.bin") + L" " + Quote(v->stem + L".obj.bin");
+    } else {
+        c += Quote(v->loader) + L" " + Quote(v->obj);
+    }
     c += L" out.wav";
     return c;
 }
@@ -1775,6 +1924,9 @@ static HWND Check(int col, int y, const wchar_t *text, int id)
 }
 
 static const int CLIENT_W = 980, CLIENT_H = 690;
+/* Height of the ROM folder and ROM status rows, which a build carrying its
+ * own images leaves out. */
+static const int ROM_ROWS_H = ROW + 52 + 10;
 
 static void CreateControls(const std::wstring &romDir)
 {
@@ -1791,20 +1943,25 @@ static void CreateControls(const std::wstring &romDir)
     g_textProc = (WNDPROC)(LONG_PTR)SetWindowLongPtrW(g_text, GWLP_WNDPROC, (LONG_PTR)TextProc);
     y += 90 + 8;
 
-    Label(C1, y, L"ROM &folder:", IDC_ROMDIRLABEL);
-    g_romDir = Make(L"EDIT", romDir.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE,
-                    C1 + 162, y, W - C1 - 162 - M - 96, 24, IDC_ROMDIR);
-    g_browse = Make(L"BUTTON", L"&Browse...", WS_TABSTOP | BS_PUSHBUTTON, 0,
-                    W - M - 88, y - 1, 88, 26, IDC_BROWSE);
-    y += ROW;
+    /* With the images built in there is nothing to choose and nothing to
+     * report, so these controls are not created at all -- a hidden
+     * control can still confuse a screen reader; an absent one cannot. */
+    if (g_embeddedDir.empty()) {
+        Label(C1, y, L"ROM &folder:", IDC_ROMDIRLABEL);
+        g_romDir = Make(L"EDIT", romDir.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE,
+                        C1 + 162, y, W - C1 - 162 - M - 96, 24, IDC_ROMDIR);
+        g_browse = Make(L"BUTTON", L"&Browse...", WS_TABSTOP | BS_PUSHBUTTON, 0,
+                        W - M - 88, y - 1, 88, 26, IDC_BROWSE);
+        y += ROW;
 
-    Label(C1, y, L"R&OM status:", IDC_ROMSTATUSLABEL);
-    g_romStatus = Make(L"EDIT", L"", WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_READONLY
-                       | ES_AUTOVSCROLL, WS_EX_CLIENTEDGE, C1 + 162, y, W - C1 - 162 - M, 52,
-                       IDC_ROMSTATUS);
-    g_statusProc = (WNDPROC)(LONG_PTR)SetWindowLongPtrW(g_romStatus, GWLP_WNDPROC,
-                                                       (LONG_PTR)StatusProc);
-    y += 52 + 10;
+        Label(C1, y, L"R&OM status:", IDC_ROMSTATUSLABEL);
+        g_romStatus = Make(L"EDIT", L"", WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_READONLY
+                           | ES_AUTOVSCROLL, WS_EX_CLIENTEDGE, C1 + 162, y, W - C1 - 162 - M, 52,
+                           IDC_ROMSTATUS);
+        g_statusProc = (WNDPROC)(LONG_PTR)SetWindowLongPtrW(g_romStatus, GWLP_WNDPROC,
+                                                           (LONG_PTR)StatusProc);
+        y += ROM_ROWS_H - ROW;
+    }
 
     int top = y;
 
@@ -1932,8 +2089,12 @@ static void SaveRemembered()
         return;
     }
     WriteSettings(path, L"settings", SettingsFromUI());
-    WritePrivateProfileStringW(L"settings", L"rom_folder", Trim(GetText(g_romDir)).c_str(),
-                               path.c_str());
+    /* A build with its own images has no folder to remember, and must not
+     * overwrite the one an ordinary build remembered. */
+    if (g_romDir != NULL) {
+        WritePrivateProfileStringW(L"settings", L"rom_folder", Trim(GetText(g_romDir)).c_str(),
+                                   path.c_str());
+    }
     const VoicePair *v = SelectedVoice();
     WritePrivateProfileStringW(L"settings", L"voice", v != NULL ? v->stem.c_str() : L"",
                                path.c_str());
@@ -1965,7 +2126,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             /* Enter on anything but a button. This is not a dialog, so
              * IsDialogMessage sends IDOK rather than the default button's
              * own ID. In the ROM folder box Enter means "use this folder". */
-            if (GetFocus() == g_romDir) {
+            if (g_romDir != NULL && GetFocus() == g_romDir) {
                 ReloadVoices(NULL);
             } else {
                 OnPreview();
@@ -2154,6 +2315,18 @@ static int RenderToFile(const VoicePair &voice, const Settings &s, const wchar_t
     return r.overruns ? 8 : 0;
 }
 
+/* ROMDIR "embedded" means the images this build carries. */
+static std::wstring RomDirArg(const wchar_t *arg)
+{
+    if (wcscmp(arg, L"embedded") == 0) {
+        if (g_embeddedDir.empty()) {
+            g_embeddedDir = ExtractEmbeddedImages();
+        }
+        return g_embeddedDir;
+    }
+    return arg;
+}
+
 static int RunSelfTest(int argc, wchar_t **argv)
 {
     std::wstring status;
@@ -2163,12 +2336,12 @@ static int RunSelfTest(int argc, wchar_t **argv)
         if (!ParseValues(argv + 4, s)) {
             return 2;
         }
-        std::vector<VoicePair> voices = FindVoices(argv[2], status);
+        std::vector<VoicePair> voices = FindVoices(RomDirArg(argv[2]), status);
         const VoicePair *v = FindStem(voices, argv[3]);
         return v == NULL ? 3 : RenderToFile(*v, s, argv[19], argv[20]);
     }
     if (mode == L"--selftest-preset" && argc == 6) {
-        std::vector<VoicePair> voices = FindVoices(argv[2], status);
+        std::vector<VoicePair> voices = FindVoices(RomDirArg(argv[2]), status);
         if (!FileExists(argv[3])) {
             return 2;
         }
@@ -2182,7 +2355,7 @@ static int RunSelfTest(int argc, wchar_t **argv)
         if (!ParseValues(argv + 4, s) || !DirExists(argv[19]) || !TextArg(argv[20], text)) {
             return 2;
         }
-        std::vector<VoicePair> voices = FindVoices(argv[2], status);
+        std::vector<VoicePair> voices = FindVoices(RomDirArg(argv[2]), status);
         const VoicePair *v = FindStem(voices, argv[3]);
         if (v == NULL) {
             return 3;
@@ -2198,7 +2371,7 @@ static int RunSelfTest(int argc, wchar_t **argv)
         if (!ParseValues(argv + 4, s)) {
             return 2;
         }
-        std::vector<VoicePair> voices = FindVoices(argv[2], status);
+        std::vector<VoicePair> voices = FindVoices(RomDirArg(argv[2]), status);
         const VoicePair *v = FindStem(voices, argv[3]);
         if (v == NULL) {
             return 3;
@@ -2261,6 +2434,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
                           || wcscmp(argv[1], L"--selftest-sweep") == 0
                           || wcscmp(argv[1], L"--write-preset") == 0)) {
             int rc = RunSelfTest(argc, argv);
+            RemoveEmbeddedImages();
             LocalFree(argv);
             return rc;
         }
@@ -2286,7 +2460,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
             g_initialVoice = ReadString(path, L"settings", L"voice");
         }
     }
-    g_initialRomDir = ChooseRomDir(givenRomDir, remembered);
+    /* A build carrying its own images uses them, and nothing else. */
+    g_embeddedDir = ExtractEmbeddedImages();
+    g_initialRomDir = g_embeddedDir.empty() ? ChooseRomDir(givenRomDir, remembered)
+                                            : g_embeddedDir;
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
@@ -2315,7 +2492,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     }
 
     const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX;
-    RECT r = { 0, 0, Px(CLIENT_W), Px(CLIENT_H) };
+    RECT r = { 0, 0, Px(CLIENT_W), Px(CLIENT_H - (g_embeddedDir.empty() ? 0 : ROM_ROWS_H)) };
     AdjustWindowRect(&r, style, FALSE);
     HWND hwnd = CreateWindowExW(0, WINDOW_CLASS, WINDOW_TITLE, style, CW_USEDEFAULT,
                                 CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
@@ -2353,6 +2530,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
             DispatchMessageW(&msg);
         }
     }
+    RemoveEmbeddedImages();
     CoUninitialize();
     DeleteCriticalSection(&g_engine);
     return (int)msg.wParam;

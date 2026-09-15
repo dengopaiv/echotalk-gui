@@ -104,12 +104,27 @@ class GUITHREADINFO(ctypes.Structure):
 ENUMPROC = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
 
 
-def find_window(timeout=10.0):
+def find_window(pid, timeout=10.0):
+    """The main window of the process this script launched -- never just the
+    first window of the class. A copy of the GUI the user has open has the
+    same class, and a check that types into it, or closes it, is a check
+    that damages someone's work."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        hwnd = u32.FindWindowW(WINDOW_CLASS, None)
-        if hwnd:
-            return hwnd
+        found = []
+
+        def cb(h, _):
+            owner = w.DWORD()
+            u32.GetWindowThreadProcessId(h, ctypes.byref(owner))
+            buf = ctypes.create_unicode_buffer(64)
+            u32.GetClassNameW(h, buf, 64)
+            if owner.value == pid and buf.value == WINDOW_CLASS:
+                found.append(h)
+            return True
+
+        u32.EnumWindows(ENUMPROC(cb), 0)
+        if found:
+            return found[0]
         time.sleep(0.05)
     return None
 
@@ -163,7 +178,7 @@ def settle(hwnd, thread_id, timeout=10.0):
     return None
 
 
-def press_tab(hwnd, thread_id, shift=False, timeout=2.0):
+def press_tab(hwnd, thread_id, shift=False, timeout=5.0):
     """Post a real Tab and wait for focus to move; a trap costs the timeout."""
     before = focus_of(thread_id)
     if shift:
@@ -185,6 +200,12 @@ def walk(thread_id, start, steps, shift=False):
     seen, cur = [], start
     for _ in range(steps):
         nxt = press_tab(cur, thread_id, shift)
+        if nxt == cur:
+            # One re-press before calling it a trap: a keystroke that is
+            # merely slow on a busy machine must not cascade into "never
+            # reaches" for every stop after it. A real trap does not move
+            # the second time either.
+            nxt = press_tab(cur, thread_id, shift)
         seen.append(nxt)
         if not nxt or nxt == cur:
             break
@@ -218,6 +239,17 @@ def check_tab_order(hwnd, thread_id, start):
         failures += 1
     back = walk(thread_id, focus_of(thread_id), len(stops), shift=True)
     missed_back = [h for h in stops if h not in set(back)]
+    if missed_back:
+        # A posted VK_SHIFT does not always reach the key state that
+        # IsDialogMessage reads with GetKeyState: under load (it failed once
+        # inside build_release.py, straight after the 114-case render run,
+        # and passed three times in a row alone) a Shift+Tab can arrive as a
+        # plain Tab. So one retry -- said out loud, and a real fault still
+        # fails, because it fails both times.
+        print('  note Shift+Tab missed %d stop(s) on the first walk; retrying once'
+              % len(missed_back))
+        back = walk(thread_id, focus_of(thread_id), len(stops), shift=True)
+        missed_back = [h for h in stops if h not in set(back)]
     for h in missed_back:
         print('  FAIL Shift+Tab never reaches the %s' % describe(h))
     failures += 1 if missed_back else 0
@@ -348,7 +380,7 @@ def main(argv):
     proc = subprocess.Popen([EXE, '--no-settings', '--rom-dir', rom_dir])
     failures = 0
     try:
-        hwnd = find_window()
+        hwnd = find_window(proc.pid)
         if not hwnd:
             print('FAIL the window never appeared')
             return 1

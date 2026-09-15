@@ -45,3 +45,6 @@ roms/*
 # GUI release archives (a release zip is checked for images, but never
 # committed either way)
 dist/
+
+# Python bytecode from running the tools
+__pycache__/

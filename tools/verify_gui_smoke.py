@@ -47,11 +47,14 @@ def dialogs(pid):
 # 1. Preview, Stop mid-utterance, Preview on the other voice, window alive, no dialog.
 proc = subprocess.Popen([str(EXE), "--no-settings", "--rom-dir", str(ADDON)])
 try:
-    hwnd = None
-    for _ in range(100):
-        hwnd = u32.FindWindowW("EchoTalkGuiMainWindow", None)
-        if hwnd: break
-        time.sleep(0.05)
+    # Only the window of the process launched here: a copy of the GUI the
+    # user has open has the same class, and this test types into the window
+    # it finds and presses its buttons.
+    sys.path.insert(0, str(REPO / "tools"))
+    import verify_gui_keyboard as vgk
+    hwnd = vgk.find_window(proc.pid)
+    if not hwnd:
+        raise SystemExit("FAIL the window never appeared")
     time.sleep(0.5)
     text = u32.GetDlgItem(hwnd, 1001)
     u32.SendMessageW(text, 0x000C, 0, ctypes.c_wchar_p("This is a long enough sentence that stopping it part of the way through is a real test of Stop."))
