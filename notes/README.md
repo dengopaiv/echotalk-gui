@@ -31,6 +31,12 @@ out to be wrong and why.
   the Windows/Linux bit-identical result.
 - `multi_version_support_design.md` -- how one binary handles both
   Textalker versions, detected structurally rather than by hash.
+- `msvc_build.md` -- the library under MSVC with no source changes, and
+  four settings shown bit-identical to the MinGW add-on DLL. How the GUI
+  in `gui-native/` is built.
+- `pitch_above_63.md` -- what Textalker does with pitches 64-99, measured
+  with the GUI's pitch sweep: two extra steps with intonation, none in
+  monotone.
 - `mingw_build_system.md` -- build targets, runtimes, and the
   wrong-architecture trap the Makefile guards against.
 - `tms5220_port_and_audio_pipeline.md` -- how the TMS5220 port was made.

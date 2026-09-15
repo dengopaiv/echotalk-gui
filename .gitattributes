@@ -23,3 +23,6 @@
 # and goes into the add-on zip exactly as it sits here. Left byte-for-byte
 # alone so it stays verbatim in every checkout.
 nvda-addon/doc/en/copying -text
+
+# Batch files need CRLF; cmd.exe misreads labels and blocks with bare LF.
+*.cmd text eol=crlf

@@ -32,6 +32,7 @@ int main(int argc, char **argv) {
     int frame_rate = 0, compressed = 0, pitch = -1, volume = -1;
     int word_delay = -1, repeat_filter = -1;
     int chunk = -1, raw = 0;
+    int flat = 0, letter_mode = -1, punctuation = -1;
     const char *text_file = NULL;
     const char *pos[4]; int npos = 0;
 
@@ -49,6 +50,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--raw")) raw = 1;
         else if (!strcmp(argv[i], "--pitch") && i + 1 < argc) pitch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc) volume = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--flat")) flat = 1;
+        else if (!strcmp(argv[i], "--letter-mode") && i + 1 < argc) letter_mode = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--punctuation") && i + 1 < argc) punctuation = atoi(argv[++i]);
         else if (argv[i][0] == '-' && argv[i][1]) {
             fprintf(stderr, "unknown option %s\n", argv[i]); return 1;
         } else if (npos < 4) pos[npos++] = argv[i];
@@ -71,6 +75,10 @@ int main(int argc, char **argv) {
             "  --compressed       Textalker compressed speech\n"
             "  --pitch N          0-63 (default 24)\n"
             "  --volume N         0-15 (default 12)\n"
+            "  --flat             monotone: same pitch, no intonation\n"
+            "  --letter-mode N    0 speak words, 1 spell them out; not sent\n"
+            "                     to Textalker unless given\n"
+            "  --punctuation N    0 none, 1 some, 2 all; not sent unless given\n"
             "  --word-delay N     0-15 pause between words (default 0)\n"
             "  --repeat-filter N  0-99 repeat-character threshold\n"
             "                     (default 99, i.e. effectively off)\n"
@@ -116,6 +124,11 @@ int main(int argc, char **argv) {
     echotalk_set_compressed(et, compressed);
     if (pitch >= 0 && echotalk_set_pitch(et, pitch)) fprintf(stderr, "bad --pitch\n");
     if (volume >= 0 && echotalk_set_volume(et, volume)) fprintf(stderr, "bad --volume\n");
+    if (flat) echotalk_set_flat(et, 1);
+    /* Only when asked: the library sends neither mode until one is set,
+     * so passing nothing keeps Textalker's own startup modes. */
+    if (letter_mode >= 0 && echotalk_set_letter_mode(et, letter_mode)) fprintf(stderr, "bad --letter-mode\n");
+    if (punctuation >= 0 && echotalk_set_punctuation(et, punctuation)) fprintf(stderr, "bad --punctuation\n");
     if (word_delay >= 0 && echotalk_set_word_delay(et, word_delay)) fprintf(stderr, "bad --word-delay\n");
     if (repeat_filter >= 0 && echotalk_set_repeat_filter(et, repeat_filter)) fprintf(stderr, "bad --repeat-filter\n");
     if (chunk >= 0 && echotalk_set_chunk_size(et, (unsigned)chunk)) fprintf(stderr, "bad --chunk\n");

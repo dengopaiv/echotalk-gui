@@ -435,6 +435,17 @@ samples — despite doubles running through the lattice filter, the
 cycle-to-sample accumulator and the resampler. So a future cross-platform
 difference is a real bug, not drift.
 
+## The desktop GUI
+
+`gui-native/` is a Win32 GUI over the library, built with MSVC
+(`gui-native\build.cmd`, x64), exposing every setting with Preview, Render
+to WAV, presets, batch render and a pitch sweep. `tools/verify_gui.py`
+checks it byte for byte against the add-on's shipped DLL (114 cases),
+`tools/verify_gui_keyboard.py` by real keystrokes and MSAA, and
+`tools/verify_gui_smoke.py` live. Read `gui-native/README.md`; the plan,
+and what building it corrected, are in `ROADMAP.md`. **Not yet done: a
+listening pass with NVDA running.**
+
 ## What is left
 
 Nothing is blocking. In rough order of value:
@@ -443,10 +454,11 @@ Nothing is blocking. In rough order of value:
    means deciding how they supply Textalker images.
 2. Fix the `render_common.h` chunker truncation noted above.
 3. Delete the historical probes in `tools/`.
-4. Jayson wants a test file speaking a short sentence at **pitches 60
-   through 99**, to look at what Textalker does above its documented
-   range — `\x05 99P` is audibly not `\x05 63P`, and he suspects a
-   Textalker bug. Deferred by agreement; the library clamps to 63.
+4. ~~Pitches 60 through 99.~~ **Measured 2026-09-15** with the GUI's
+   pitch sweep: with `nP`, 64 and 65 are real extra steps and 65–99 are
+   identical; with `nF`, 63 is the ceiling. `\x05 99P` differs from
+   `\x05 63P` because it is `65P`. Both versions agree.
+   `notes/pitch_above_63.md`. The library still clamps to 63.
 5. The unmapped-character policy in `text_prep` is a UX decision worth
    revisiting.
 6. Re-measure the baseline table with `say` if the library is to become

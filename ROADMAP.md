@@ -6,9 +6,12 @@ library has and the add-on leaves out, with **Preview** through the sound
 card and **Render to WAV**. It is built the way the Votrax SC-01 ROM GUI,
 Votrax Native, SAM and STSPEECH GUIs already are (1.5).
 
-Written 2026-09-15, before any GUI code exists. Status: **planning**.
-Everything under "Established" below was checked on this machine that
-day. Everything under "Decisions" is a proposal until someone agrees to it.
+Written 2026-09-15, before any GUI code existed, and followed the same day.
+Status: **Phases 0–4 built and verified; Phase 5 partly done.** The GUI is
+in [gui-native/](gui-native/README.md); "Progress" at the end of this file
+says what is done, what the building corrected in this plan, and what is
+left. Everything under "Established" below was checked on this machine that
+day.
 
 Read [HANDOFF.md](HANDOFF.md) first. This document assumes it and does
 not repeat it.
@@ -256,9 +259,12 @@ every library call on the one worker thread (Constraint 2).
 
 **D4. Render exactly as the add-on does.** Settings are pushed in
 `_applyAll`'s order (pitch, flat, volume, word delay, repeat filter,
-compressed, speed, clock, sample rate), because the library sends them to
-Textalker as a command block ahead of the text and a different order is a
-different byte stream. The output rate is the add-on's floor,
+compressed, speed, clock, sample rate). *Corrected while building:* this
+was justified as "a different order is a different byte stream", which is
+wrong — the setters only store values and mark the settings dirty, and the
+library assembles its command block itself at the next speak, so call
+order does not change the output. The order is kept because it reads the
+same as the driver it copies. The output rate is the add-on's floor,
 `max(choice, int(8000 × clock + 0.5))`. Text is sanitised with the
 add-on's `[\x04\x05\x16]` → space and encoded as UTF-8, and read in blocks
 of 1024. Settings the add-on lacks are applied after its nine, and only
@@ -518,7 +524,8 @@ byte-identical to the render before saving.
 ## Part 5 — Risks and open questions
 
 - **D5 is the one real departure from the ROM GUI** (native-unit sliders
-  rather than 0–100). Worth confirming before Phase 2.
+  rather than 0–100). Built that way; see Progress for the accessibility
+  fix it needed.
 - **Letter and punctuation "startup mode"** is an assumption in the
   library, not a measurement. The "Textalker's startup mode" combo item
   avoids asserting it; measuring it would let the GUI name it.
@@ -530,3 +537,48 @@ byte-identical to the render before saving.
 - **Legacy 32-bit targets** in the Makefile and the add-on remain. Removing
   them touches the shipping add-on and is not part of this plan, so ask.
 - **Upstream**: whether this goes to `jaybird110127/echotalk` is open.
+
+---
+
+## Progress, 2026-09-15
+
+**Built:** `gui-native/` (window, build script, manifest, NOTICE, README),
+`tools/verify_gui.py`, `tools/verify_gui_keyboard.py`,
+`tools/verify_gui_smoke.py`, `say --flat --letter-mode --punctuation`,
+`notes/msvc_build.md`, `notes/pitch_above_63.md`.
+
+| Phase | State | Evidence |
+|---|---|---|
+| 0 Groundwork | done | `say` flags match the GUI byte for byte (`verify_gui_smoke.py`) |
+| 1 `--selftest` and parity | done | 114 cases byte-identical to the add-on's shipped DLL, both voices; a deliberate monotone bug fails exactly the six monotone cases |
+| 2 Window and Render to WAV | done | 30 tab stops, closed ring both ways, 23 distinct accelerators, MSAA names, roles and values; a `rõõm ÄÖÜ ☃` images folder renders |
+| 3 Preview | done, **except the listening pass with NVDA running** | Preview, Stop part-way, Preview on the other voice; window alive, no dialog |
+| 4 Presets and extras | done | derived preset combo checked by keyboard script; preset round trip, batch render and pitch sweep byte-identical to the add-on |
+| 5 Release | partly | README, NOTICE and dependency check done; `build_release.py` and the head-directory inventory line not yet |
+
+**What building corrected in this plan:**
+
+- **D4's reason** was wrong (see D4); the conclusion stands.
+- **D5's premise was wrong, and the fix is now part of the design.** A
+  trackbar's accessible value is *not* its position: the system MSAA proxy
+  reports position as a percentage of the range. The first keyboard run
+  read Pitch 24 as "38", Volume 12 as "80", Repeat 99 as "100", Chunk 80 as
+  "31". The GUI now registers a Dynamic Annotation server
+  (`IAccPropServer`, `PROPID_ACC_VALUE`) on every slider whose range is not
+  0–100, answering with the live position; the check reads "24", "12",
+  "99", "80", and "25" after an arrow press. Sliders with a 0–100 range
+  (Rate, Chip clock) were already right.
+- **Part 3's sketch** gained two buttons (batch render, pitch sweep) that
+  have no letter left, and the Voice preset combo moved into the window
+  proper. Enter outside the text box previews: this is not a dialog, so
+  `IsDialogMessage` sends `IDOK` for Enter, which the window now handles.
+- **HANDOFF's pitch 60–99 question is answered** by the sweep:
+  `notes/pitch_above_63.md`. With intonation, 64 and 65 are real extra
+  steps and 65–99 are identical; in monotone 63 is the ceiling.
+
+**Left:**
+
+1. A listening pass with NVDA 2026.1 running, written down in `notes/`.
+2. `tools/build_release.py` (Phase 5 item 2).
+3. The head-directory `README.md` inventory line for `echotalk-gui`.
+4. ARM64 build and parity run, when there is hardware.

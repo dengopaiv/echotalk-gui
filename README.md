@@ -42,8 +42,12 @@ triple; the TMS5220's own frame rate offers four fixed steps; the clock
 multiplier changes both, for the sped-up-tape character; and the output
 sample rate changes neither.
 
-A native desktop GUI — every setting, preview and WAV export — is planned
-but not yet started; see [ROADMAP.md](ROADMAP.md).
+**A native desktop GUI** — every add-on setting plus the ones the add-on
+hides, Preview, Render to WAV, presets, batch render and a pitch sweep — is
+in [gui-native/](gui-native/README.md): `gui-native\build.cmd`, then
+`gui-native\build\echotalk_gui-x64.exe`. Its output is byte-identical to
+the add-on's in 114 checked cases. The plan and its progress are in
+[ROADMAP.md](ROADMAP.md).
 
 **Start with [HANDOFF.md](HANDOFF.md)** — current state, build and run
 instructions, reference baselines, and the facts worth not re-deriving.
