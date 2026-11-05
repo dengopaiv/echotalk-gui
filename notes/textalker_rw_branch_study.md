@@ -24,11 +24,14 @@ Left out, from this fork:
 
 `tools/disasm.py` and `tools/syllabify.py` stay, and make all of it from your own image.
 
-**Still in the notes, on purpose, for the owner to know:** individual Textalker rules quoted in the
-course of explaining them, chiefly in `textalker_rewrite_table_discovery.md` and
-`textalker3_rule_changes.md`, and `phoneme_alphabet.md`'s measured correspondence. **Already on this
-fork's `main` before this work, from upstream's `main`, and not touched:** `notes/disasm_fd53.txt`,
-and a short excerpt in `notes/onset_glitch_fixed_by_real_loader.md`.
+**Still in the notes, kept by the owner's decision of 2026-11-05:** individual Textalker rules quoted
+in the course of explaining them, chiefly in `textalker_rewrite_table_discovery.md` and
+`textalker3_rule_changes.md`, and `phoneme_alphabet.md`'s measured correspondence.
+
+**`notes/disasm_fd53.txt`,** a fourth listing, was already on this fork's `main`, from upstream's
+`main`. The owner decided the same day that it should go too, and it was removed in a commit of its
+own. It stays in this fork's history, and on upstream's `main`. A short excerpt in
+`notes/onset_glitch_fixed_by_real_loader.md`, also from upstream's `main`, was not touched.
 
 Changed to make it build here: `.gitignore` and `tools/say.c`, the two conflicts, each resolved by
 keeping both sides; and `gui-native/build.cmd`, which compiles the nine new source files.

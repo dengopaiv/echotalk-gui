@@ -198,6 +198,7 @@ for instructions.
   `$D009` blocks on a keypress, but the single-character problem it was
   investigating was solved a completely different way.
 - `v13_compatibility.md`, `v13_working.md`,
-  `v13_vs_v3_cricket_investigation.md`, `disasm_fd53.txt`,
-  `dispatch_table_d817.txt` -- early v1.3 work, absorbed into
+  `v13_vs_v3_cricket_investigation.md`, `disasm_fd53.txt` (removed from this
+  fork on 2026-11-05, as the listings above; it stays in this fork's history and on
+  upstream's `main`), `dispatch_table_d817.txt` -- early v1.3 work, absorbed into
   `multi_version_support_design.md` and HANDOFF.
