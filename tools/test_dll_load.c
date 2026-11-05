@@ -144,10 +144,10 @@ int main(int argc, char **argv) {
     fn_get_uint   gethz   = (fn_get_uint)sym("echotalk_sample_rate");
 
     if (failures) { printf("\n%d export(s) missing\n", failures); return 1; }
-    printf("  ok    all 44 exports resolved\n");
+    printf("  ok    every export this test uses resolved\n");
 
     sprintf(detail, "got %u", abi());
-    check("abi version", abi() == 6, detail);
+    check("abi version", abi() == 12, detail);
 
     char err[256] = {0};
     void *et = create(argv[2], argv[3], err, sizeof err);
@@ -181,7 +181,10 @@ int main(int argc, char **argv) {
 
     check("range checks reject", setrate(et, 9) == -1 && setpit(et, 99) == -1 &&
                                  setclk(et, 99.0) == -1 && sethz(et, 1) == -1 &&
-                                 setraw(et, 7) == -1 && setchk(et, 999) == -1, "");
+                                 setraw(et, 7) == -1 && setchk(et, 5000) == -1, "");
+    /* 999 is legal now: the chunk bound is the largest EXTENDED line
+     * buffer, not Textalker's own 256. */
+    check("a chunk past 255 is accepted", setchk(et, 999) == 0, "");
     check("setters accept", setrate(et, 0) == 0 && setpit(et, 24) == 0 &&
                             setvol(et, 12) == 0 && setdel(et, 0) == 0 &&
                             setrep(et, 99) == 0 && setcmp(et, 0) == 0 &&

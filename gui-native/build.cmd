@@ -49,10 +49,19 @@ cl /nologo /c /std:c11 /O2 /MT /W3 /D_CRT_SECURE_NO_WARNINGS ^
    "%ROOT%\src\text_prep.c" ^
    "%ROOT%\src\chunker.c" ^
    "%ROOT%\src\resample.c" ^
+   "%ROOT%\src\dsk.c" ^
+   "%ROOT%\src\tk_arpabet.c" ^
+   "%ROOT%\src\tk_dict.c" ^
+   "%ROOT%\src\tk_disk.c" ^
+   "%ROOT%\src\tk_image.c" ^
+   "%ROOT%\src\tk_machine.c" ^
+   "%ROOT%\src\tk_rules.c" ^
+   "%ROOT%\src\tk_syllable.c" ^
+   "%ROOT%\src\tk_synth.c" ^
    "%ROOT%\third_party\fake6502\fake6502.c" ^
    "%ROOT%\third_party\tms5220_core\tms5220_core.c" ^
    "%ROOT%\third_party\tms5220_core\tms5220_reset.c" || exit /b 1
-set "LIBOBJS=echotalk.obj text_prep.obj chunker.obj resample.obj fake6502.obj tms5220_core.obj tms5220_reset.obj"
+set "LIBOBJS=echotalk.obj text_prep.obj chunker.obj resample.obj dsk.obj tk_arpabet.obj tk_dict.obj tk_disk.obj tk_image.obj tk_machine.obj tk_rules.obj tk_syllable.obj tk_synth.obj fake6502.obj tms5220_core.obj tms5220_reset.obj"
 
 echo === compiling resources (%ARCH%) ===
 rc /nologo /fo "%OUT%\echotalk_gui.res" /i "%HERE%." "%HERE%echotalk_gui.rc" || exit /b 1

@@ -12,6 +12,9 @@
 #include "chunker.h"
 #include "resample.h"
 #include "tms5220_core.h"
+#include "tk.h"
+#include "dsk.h"
+#include "tk_disk.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,7 +35,34 @@ extern void step6502(int printRegs);
 #define DOS_HOOK         0xBA69
 #define TRIM_THRESHOLD   150
 #define TRIM_MARGIN      40
-#define DEFAULT_CHUNK    80
+/* How much text goes to Textalker between carriage returns.
+ *
+ * 80 is the EMULATED engine's limit and it is not Textalker's: nothing
+ * here plays the part of DOS setting up a screen, so $FD80-$FD82 read
+ * as zero and the auto-flush point is undefined. Measured, it truncates
+ * a line at 79 characters -- 78 is byte-identical between the engines
+ * and 79 is where the emulation drops the tail. So the chunker has to
+ * stay under it.
+ *
+ * The NATIVE engine has no such problem. Its only bound is Textalker's
+ * own, $DB6A's `CPX #$F0`: the line buffer flushes at 240 bytes, and
+ * that flush lands wherever it lands, including mid-word. So the
+ * chunker still runs -- it splits at clause and word boundaries, which
+ * is the whole point of it -- it just gets a much longer window.
+ *
+ * The window is BYTES of buffer, not characters, and the syllabifier
+ * inserts a sentinel at every boundary it finds. Measured over 243
+ * lines of prose, that costs a median of 1.41 bytes per character in
+ * v3.1.x and up to 1.58; a line of one- and two-letter words reaches
+ * 1.8. So 130 keeps the buffer under 240 even then. v1.3 has no
+ * syllabifier and grows by 8%, so it gets 200.
+ *
+ * Exceeding it would not corrupt anything -- Textalker would simply
+ * split the line itself -- but it would split mid-word, which is the
+ * thing the chunker exists to avoid. */
+#define DEFAULT_CHUNK        80
+#define NATIVE_CHUNK_SYL    130
+#define NATIVE_CHUNK_PLAIN  200
 
 /* --- runaway guards ---
  *
@@ -97,6 +127,7 @@ struct echotalk {
     int punctuation;            /* 0 none, 1 some, 2 all               */
     int modes_chosen;           /* caller picked the two above         */
     size_t chunk_size;          /* 0 = do not chunk */
+    int    chunk_pinned;        /* the host set one; stop tracking the engine */
     int raw;                    /* 1 = skip text preparation */
     unsigned cmd_errors;        /* malformed Ctrl-D commands seen */
     unsigned overruns;          /* runaway guards tripped -- always a fault */
@@ -140,6 +171,18 @@ struct echotalk {
     double resamp_phase;
 
     int aborted;
+
+    /* The native engine: the C rewrite of Textalker's speech path. The
+     * image is loaded whether or not it is selected, so switching
+     * engines mid-stream costs nothing; tk_ready says whether it
+     * recognised the image at all. */
+    int      engine;
+    int      tk_ready;
+    tk_image tk_img;
+    tk_machine tk_mach;
+    uint8_t  tk_bytes[64];       /* the sink consumes them as they come */
+    tk_sink  tk_sink_inst;       /* the same sink, bound to this instance */
+    tk_dict *tk_dict_inst;       /* an optional pronunciation dictionary */
 };
 
 /* Fake6502 keeps the CPU in globals, so the bus callbacks need to know
@@ -186,10 +229,29 @@ uint8_t read6502(uint16_t address) {
     return et->mem[address];
 }
 
+/* Every byte either engine hands the chip goes through here, so
+ * ECHOTALK_CHIP_BYTES=<file> captures exactly what the TMS5220 saw and
+ * the two engines can be diffed directly. Diagnostic only. */
+static FILE *g_chip_dump;
+static FILE *g_tk_trace;   /* ECHOTALK_TK_TRACE */
+
+static void chip_write(echotalk *et, uint8_t value) {
+    /* value, the audio sample this arrived at, and how full the FIFO
+     * was: the byte stream alone cannot show a pacing difference. */
+    if (g_chip_dump)
+        fprintf(g_chip_dump, "%02x %lu %u ip=%d pc=%d sub=%d e=%d p=%d pe=%u rng=%04x x0=%d\n", value,
+                (unsigned long)et->count, et->tms.m_fifo_count,
+                et->tms.m_IP, et->tms.m_PC, et->tms.m_subcycle,
+                et->tms.m_current_energy, et->tms.m_current_pitch,
+                et->tms.m_previous_energy,
+                et->tms.m_RNG, et->tms.m_x[0]);
+    tms5220_data_w(&et->tms, value);
+}
+
 void write6502(uint16_t address, uint8_t value) {
     echotalk *et = g_active;
     if (address >= 0xC0A0 && address <= 0xC0AF) {
-        tms5220_data_w(&et->tms, value);
+        chip_write(et, value);
         return;
     }
     if (address == 0xC08B) { et->lc_ram_enabled = 1; return; }
@@ -234,6 +296,217 @@ static void send_string(echotalk *et, const char *s) {
     for (; *s; s++) send_char(et, (uint8_t)*s);
 }
 
+/* --- the native engine ---------------------------------------------
+ *
+ * The rewrite produces the same chip bytes the 6502 does, but nothing
+ * about a byte stream says WHEN each byte arrives, and that is what
+ * decides how full the FIFO is and therefore what the chip plays. So
+ * the port hands the bytes over through a sink that also reproduces
+ * Textalker's own flow control:
+ *
+ *   $E9CA  before every Nth byte, wait for BL. N is 8 in 3.1.3, which
+ *          counts down through $FD88, and 1 in v1.3, which polls before
+ *          every byte. Textalker writes at most 7 bytes past a BL, so
+ *          the FIFO tops out at 15 of its 16 -- which is exactly what
+ *          the emulator's arrival trace shows, and why a write is never
+ *          dropped.
+ *   $E9D8  BL clear and the chip no longer talking: the packer gives up
+ *          on the rest of its bits. Counted, because it should not
+ *          happen mid-speech.
+ *   $E9E3  after a pause, wait until the chip stops talking.
+ *
+ * $EA16's busy delay after that wait is NOT reproduced: it is pure
+ * cycle-counting rather than behaviour, and it only lengthens a gap
+ * that per-utterance trimming removes again. */
+
+static int tk_run_until(echotalk *et, int want_room);
+
+static void tk_sink_byte(void *ctx, uint8_t b) {
+    echotalk *et = (echotalk *)ctx;
+    /* A write into a full FIFO is dropped silently by the chip, and a
+     * dropped byte is a corrupted frame -- speech that comes out
+     * mangled with nothing to say why. The flow control above should
+     * make it impossible (at most 8 free writes from a buffer-low of
+     * 8), so if this ever fires the model is wrong. */
+    /* Keep the FIFO where Textalker keeps it: around six to nine bytes.
+     *
+     * This is not just about never dropping a byte. SPEAK EXTERNAL
+     * RESETS THE FIFO, and Textalker sends one at the start of every
+     * allophone group, so whatever is still in flight at that moment is
+     * discarded. The 6502 produces bytes at roughly the rate the chip
+     * eats them, so only the tail of a stop frame is ever lost. Let the
+     * FIFO fill to 16 instead and real frames go over the side -- the
+     * chip gets partial frames, and that is the malformed-data noise. */
+    if (et->tms.m_fifo_count >= 16) tk_run_until(et, 0);
+    if (et->tms.m_fifo_count >= 16) et->overruns++;
+    chip_write(et, b);
+}
+
+/* THE CHIP FREE-RUNS ON REAL HARDWARE. Ours only advances when it is
+ * ticked, and getting that backwards is what made the first version of
+ * this engine unusable. Two of Textalker's status tests mean something
+ * different once the chip can only run when we let it:
+ *
+ * $E9D8, the give-up branch, fires when BL is clear and the chip has
+ * stopped talking. On hardware that means the chip really has finished
+ * and there is no point waiting. Here it also matched "the chip has not
+ * been allowed to run yet", which is not the same thing at all -- and
+ * taking it abandons the rest of the packer's bits. That is what turned
+ * 3.1.3 into a chip being fed malformed frames, and under v1.3, which
+ * polls before EVERY byte rather than every eighth, deleted most of the
+ * speech outright. The branch is therefore NOT modelled: the condition
+ * it detects cannot arise here.
+ *
+ * What must be modelled instead is the one hard requirement the 6502
+ * never had to think about -- a write into a full FIFO is dropped
+ * silently, and a dropped byte is a corrupted frame. So the chip is
+ * always given room before a byte goes in. */
+/* A byte takes about 33 samples to consume and a frame about 200,
+ * so a stall has to be judged over more than a frame. Two ticks --
+ * which is what this was during one experiment -- declares a stall
+ * constantly and lets writes go into a full FIFO. */
+#define TK_STALL_TICKS 300
+
+/* The cost of ONE TURN of each polling loop, in 6502 cycles. Ticking a
+ * whole sample instead leaves every byte landing on a sample boundary,
+ * where the real ones land at fractional positions -- and the chip's
+ * output depends on where in its interpolation period a byte arrives.
+ *
+ *   $FCB3 LDA $FD87 4, CMP 2, BEQ 3                             =  9
+ *   $FCC9 LDA $C000 4, JSR $FCC5 (ROR*3 + RTS = 12) +6 = 18,
+ *         again 18, LDA $C000 4, RTS 6                          = 50
+ *   so one status read, including the JSR to $FCB3, is 6+9+50   = 65
+ *
+ *   $E9CA  JSR 65, AND 2, BNE 2, JSR 65, AND 2, BNE 3           = 139
+ *   $E9E3  JSR 65, AND 2, BNE 3                                 =  70
+ */
+#define TK_POLL_BL_CYCLES 139
+#define TK_POLL_TS_CYCLES 70
+
+/* Let the chip run until `want` is true, or until it is plainly not
+ * going to be: stopped, and with the FIFO no longer draining. Returns
+ * the number of ticks spent. */
+static int tk_run_until(echotalk *et, int want_room)
+{
+    int guard = 0, stalled = 0;
+    uint8_t last = et->tms.m_fifo_count;
+    for (;;) {
+        uint8_t st = tms5220_status_r(&et->tms);
+        if (want_room ? (st & 0x40) != 0 : et->tms.m_fifo_count < 16)
+            return guard;
+        tick_chip(et, TK_POLL_BL_CYCLES);
+        if (et->tms.m_fifo_count != last) {
+            last = et->tms.m_fifo_count;
+            stalled = 0;
+        } else if (!(st & 0x80) && ++stalled > TK_STALL_TICKS) {
+            return guard;         /* stopped for good; a SPEAK EXTERNAL
+                                   * will clear the FIFO soon enough */
+        }
+        if (guard++ >= DRAIN_BUDGET) { et->overruns++; return guard; }
+    }
+}
+
+static int tk_sink_wait_bl(void *ctx) {          /* $E9CA */
+    /* Textalker's real flow control, and the thing that paces the whole
+     * conversation with the chip: wait until the FIFO is down to eight
+     * bytes before writing the next one. Every 8th byte in 3.1.3, every
+     * byte in v1.3. Skip it and the FIFO saturates at 16, where writes
+     * are dropped silently -- which is most of what "malformed data"
+     * turned out to be. */
+    tk_run_until((echotalk *)ctx, 1);
+    return 1;                                    /* never $E9D8 */
+}
+
+/* $E9E3: play out what is queued and stop. Textalker asks for this
+ * after a stop frame, and it means the pause is heard rather than
+ * discarded by the SPEAK EXTERNAL that follows -- which resets the
+ * FIFO and would throw those frames away. */
+static void tk_sink_wait_ts(void *ctx) {
+    echotalk *et = (echotalk *)ctx;
+    long t0 = (long)et->count;
+    int guard = 0;
+    /* Exactly $E9E3: JSR $FCB3 / AND #$80 / BNE back. It waits for the
+     * TALK bit and nothing else. Earlier versions of this also waited
+     * for the FIFO to empty, or gave up when it stopped draining --
+     * both were attempts to paper over the $EA1A and $E9CA bugs, and
+     * both are wrong: the chip legitimately leaves bytes unread when it
+     * hits a stop frame, and bailing early injects silence. */
+    while ((tms5220_status_r(&et->tms) & 0x80)) {
+        if (guard++ >= DRAIN_BUDGET) { et->overruns++; break; }
+        tick_chip(et, TK_POLL_TS_CYCLES);
+    }
+    if (g_tk_trace)
+        fprintf(g_tk_trace, "waitts %ld' + BS + 'n", (long)et->count - t0);
+}
+
+/* $E9EB, the pause after a stop frame. This one IS reproduced: it is a
+ * deliberate delay loop -- the length of the pause after a comma or a
+ * stop -- rather than incidental 6502 compute time, and it is exact.
+ *
+ *   $E9EB SEC 2; $E9EC PHA 3; $E9ED LDX #$08 2; $E9EF DEX/BNE 39;
+ *   $E9F2 SBC 2; $E9F4 BNE 3/2; $E9F6 PLA 4; $E9F7 SBC 2;
+ *   $E9F9 BNE 3/2; $E9FB RTS 6
+ *
+ * which totals 23*A^2 + 34*A + 7 cycles. A is the pitch group times 16
+ * ($EA0F), so group 7 -- where every line starts -- is a quarter of a
+ * second. Leaving it out costs "HI." its entire pause.
+ *
+ * The 6502's OTHER time is deliberately not reproduced. On real
+ * hardware some of the gap after a stop is the Apple II simply
+ * thinking, and removing that is a large part of why this rewrite
+ * exists. */
+static void tk_sink_delay(void *ctx, uint8_t a) {
+    echotalk *et = (echotalk *)ctx;
+    uint32_t n = a;
+    tick_chip(et, 23u * n * n + 34u * n + 7u);
+    if (g_tk_trace) fprintf(g_tk_trace, "delay a=%u %lu\n", a, (unsigned long)et->count);
+}
+
+/* $FCB3 AND #$80, the talk-status bit that $EA1A reads before it will
+ * send a SPEAK EXTERNAL.
+ *
+ * Note what this CANNOT do: run the chip on first. $EA1A is reached
+ * once per allophone, so draining here plays every frame to completion
+ * and then idles -- starvation, and the clipping that comes with it.
+ * The chip's state at this moment is the product of all the 6502 time
+ * that has passed, which is exactly what the native engine does not
+ * model. See HANDOFF. */
+static void tk_sink_spend(void *ctx, unsigned cycles) {
+    tick_chip((echotalk *)ctx, cycles);
+}
+
+static int tk_sink_talking(void *ctx) {
+    echotalk *et = (echotalk *)ctx;
+    { int t = (tms5220_status_r(&et->tms) & 0x80) != 0;
+      if (g_tk_trace) fprintf(g_tk_trace, "start %s s=%lu f=%u\n",
+              t ? "SKIPPED" : "sent", (unsigned long)et->count,
+              et->tms.m_fifo_count);
+      return t; }
+}
+
+static void tk_bind_sink(echotalk *et) {
+    et->tk_sink_inst.byte = tk_sink_byte;
+    et->tk_sink_inst.wait_bl = tk_sink_wait_bl;
+    et->tk_sink_inst.wait_ts = tk_sink_wait_ts;
+    et->tk_sink_inst.delay = tk_sink_delay;
+    et->tk_sink_inst.talking = tk_sink_talking;
+    et->tk_sink_inst.spend = tk_sink_spend;
+    et->tk_sink_inst.ctx = et;
+}
+
+/* One stream of input bytes, through whichever engine is selected. */
+static void feed_bytes(echotalk *et, const char *s, size_t len) {
+    if (et->engine == ECHOTALK_ENGINE_NATIVE && et->tk_ready) {
+        tk_machine_feed(&et->tk_mach, (const uint8_t *)s, (int)len);
+        return;
+    }
+    for (size_t i = 0; i < len; i++) send_char(et, (uint8_t)s[i]);
+}
+
+static void feed_string(echotalk *et, const char *s) {
+    feed_bytes(et, s, strlen(s));
+}
+
 /* --- setup ---------------------------------------------------------- */
 
 static void parse_version(echotalk *et, size_t loader_len) {
@@ -269,30 +542,23 @@ static void parse_version(echotalk *et, size_t loader_len) {
 #undef CH
 }
 
-static int boot(echotalk *et, const char *loader_path, const char *obj_path,
-                char *err, size_t errlen) {
+static int boot(echotalk *et, const uint8_t *loader, size_t nr,
+                const uint8_t *obj, size_t no, char *err, size_t errlen) {
 #define FAIL(msg) do { if (err) snprintf(err, errlen, "%s", msg); return -1; } while (0)
-    FILE *f = fopen(loader_path, "rb");
-    if (!f) FAIL("cannot open loader image");
-    size_t nr = fread(et->mem + LOADER_ADDR, 1, 0x2000, f);
-    fclose(f);
     if (nr < 16) FAIL("loader image is too small to be valid");
+    if (nr > 0x2000) nr = 0x2000;
+    memcpy(et->mem + LOADER_ADDR, loader, nr);
 
     /* The loader's trampoline templates say where the OBJ goes: their
-     * JMP targets are its jump table, so the page is the load address. */
-    for (size_t i = 0; i + 6 < nr && !et->obj_addr; i++) {
-        const uint8_t *p = et->mem + LOADER_ADDR + i;
-        if (p[0] == 0x48 && p[1] == 0xAD && p[2] == 0x8B &&
-            p[3] == 0xC0 && p[4] == 0x4C)
-            et->obj_addr = (uint16_t)(p[6] << 8);
-    }
+     * JMP targets are its jump table, so the page is the load address.
+     * tk_disk.c pairs a loader with an engine on a disk image by the
+     * same signature, and owns the one copy of it. */
+    et->obj_addr = (uint16_t)tk_disk_obj_page(et->mem + LOADER_ADDR, nr);
     if (!et->obj_addr) FAIL("loader contains no Textalker entry trampoline");
 
-    f = fopen(obj_path, "rb");
-    if (!f) FAIL("cannot open Textalker image");
-    size_t no = fread(et->mem + et->obj_addr, 1, 0x10000 - et->obj_addr, f);
-    fclose(f);
     if (no < 0x1000) FAIL("Textalker image is too small to be valid");
+    if (no > (size_t)(0x10000 - et->obj_addr)) no = 0x10000 - et->obj_addr;
+    memcpy(et->mem + et->obj_addr, obj, no);
 
     parse_version(et, nr);
 
@@ -341,8 +607,11 @@ static int boot(echotalk *et, const char *loader_path, const char *obj_path,
 
 /* --- public --------------------------------------------------------- */
 
-echotalk *echotalk_create(const char *loader_path, const char *obj_path,
-                          char *errbuf, size_t errbuf_len) {
+/* Everything after the two images are in hand, whether they came from
+ * two files or out of a disk image. */
+static echotalk *create_mem(const uint8_t *loader, size_t nr,
+                            const uint8_t *obj, size_t no,
+                            char *errbuf, size_t errbuf_len) {
     if (g_active) {
         if (errbuf) snprintf(errbuf, errbuf_len,
                              "an echotalk instance already exists "
@@ -373,7 +642,33 @@ echotalk *echotalk_create(const char *loader_path, const char *obj_path,
     et->settings_dirty = 1;  /* push defaults before the first utterance */
 
     g_active = et;
-    if (boot(et, loader_path, obj_path, errbuf, errbuf_len) != 0) {
+    { const char *cd = getenv("ECHOTALK_CHIP_BYTES");
+      if (cd && !g_chip_dump) g_chip_dump = fopen(cd, "w"); }
+    { const char *tt = getenv("ECHOTALK_TK_TRACE");
+      if (tt && !g_tk_trace) g_tk_trace = fopen(tt, "w"); }
+    /* Load the image for the native engine too, whatever engine is
+     * selected: it costs a read of a file already being read, and it
+     * lets echotalk_set_engine() switch at any time. A failure here is
+     * not fatal -- an image the rewrite does not recognise simply
+     * leaves the emulated engine as the only one available. */
+    {
+        char tkerr[256];
+        et->tk_ready = tk_image_load_mem(&et->tk_img, obj, no, loader, nr,
+                                         NULL, tkerr, sizeof tkerr) == 0;
+        if (et->tk_ready) {
+            tk_machine_init(&et->tk_mach, &et->tk_img, et->tk_bytes,
+                            (int)sizeof et->tk_bytes);
+            /* The same talk-only command boot() sends the 6502, so the
+             * two engines start from the same state. Sent BEFORE the
+             * sink is attached: with it attached this spends the
+             * driver's cycles on the chip during creation, which moved
+             * the EMULATED path's output by a sample. */
+            tk_machine_feed(&et->tk_mach, (const uint8_t *)"\x05T", 2);
+            tk_bind_sink(et);
+            tk_chip_attach(&et->tk_mach.chip, &et->tk_sink_inst);
+        }
+    }
+    if (boot(et, loader, nr, obj, no, errbuf, errbuf_len) != 0) {
         g_active = NULL;
         free(et->audio); free(et->speaking);
     free(et->pending); free(et->seg); free(et);
@@ -382,9 +677,102 @@ echotalk *echotalk_create(const char *loader_path, const char *obj_path,
     return et;
 }
 
+/* Not on the stack: 72K of it, and only one instance may exist anyway. */
+static uint8_t g_loader[0x2000];
+static uint8_t g_obj[0x10000];
+
+echotalk *echotalk_create(const char *loader_path, const char *obj_path,
+                          char *errbuf, size_t errbuf_len) {
+    FILE *f;
+    size_t nr, no;
+
+    f = fopen(loader_path, "rb");
+    if (!f) {
+        if (errbuf) snprintf(errbuf, errbuf_len, "cannot open loader image");
+        return NULL;
+    }
+    nr = fread(g_loader, 1, sizeof g_loader, f);
+    fclose(f);
+
+    f = fopen(obj_path, "rb");
+    if (!f) {
+        if (errbuf) snprintf(errbuf, errbuf_len, "cannot open Textalker image");
+        return NULL;
+    }
+    no = fread(g_obj, 1, sizeof g_obj, f);
+    fclose(f);
+
+    return create_mem(g_loader, nr, g_obj, no, errbuf, errbuf_len);
+}
+
+/* An Apple II disk image straight off the floppy, with no extraction
+ * step at all. The pair is found structurally (src/tk_disk.c), so this
+ * works for a 3.1.x build nobody here has seen and for either sector
+ * ordering -- the same promise echotalk_create() makes for two files. */
+echotalk *echotalk_create_from_disk_version(const char *disk_path,
+                                           const char *want_version,
+                                           char *errbuf, size_t errbuf_len) {
+    static dsk d;
+    static tk_disk_pair pair;
+    char err[512];
+
+    if (g_active) {
+        if (errbuf) snprintf(errbuf, errbuf_len,
+                             "an echotalk instance already exists "
+                             "(the 6502 core is a singleton)");
+        return NULL;
+    }
+    if (dsk_open(&d, disk_path, err, sizeof err) < 0) {
+        if (errbuf) snprintf(errbuf, errbuf_len, "%s", err);
+        return NULL;
+    }
+    if (tk_disk_find(&d, want_version, &pair, err, sizeof err) < 0) {
+        if (errbuf) snprintf(errbuf, errbuf_len, "%s", err);
+        return NULL;
+    }
+    return create_mem(pair.loader, pair.loader_len,
+                      pair.obj, pair.obj_len, errbuf, errbuf_len);
+}
+
+echotalk *echotalk_create_from_disk(const char *disk_path,
+                                    char *errbuf, size_t errbuf_len) {
+    return echotalk_create_from_disk_version(disk_path, NULL,
+                                             errbuf, errbuf_len);
+}
+
+/* Which Textalker versions a disk carries, comma-separated, so a host
+ * can offer each as its own voice. A build the C engine does not
+ * recognise is reported as "unknown" and still runs, on the emulated
+ * engine -- Jayson's PIZZA.DSK carries one. Returns how many were
+ * found, or -1 if the disk could not be read (message in `out`). */
+int echotalk_disk_versions(const char *disk_path, char *out, size_t cap) {
+    static dsk d;
+    tk_disk_match m[TK_DISK_MAXMATCH];
+    char err[512];
+    size_t used = 0;
+    int n, i;
+
+    if (cap) out[0] = 0;
+    if (dsk_open(&d, disk_path, err, sizeof err) < 0) {
+        if (cap) snprintf(out, cap, "%s", err);
+        return -1;
+    }
+    n = tk_disk_list(&d, m, TK_DISK_MAXMATCH);
+    for (i = 0; i < n; i++) {
+        size_t len = strlen(m[i].version);
+        if (used + len + 2 >= cap) break;
+        if (used) out[used++] = ',';
+        memcpy(out + used, m[i].version, len);
+        used += len;
+        out[used] = 0;
+    }
+    return n;
+}
+
 void echotalk_destroy(echotalk *et) {
     if (!et) return;
     if (g_active == et) g_active = NULL;
+    tk_dict_free(et->tk_dict_inst);
     free(et->audio); free(et->speaking);
     free(et->pending); free(et->seg); free(et);
 }
@@ -471,10 +859,22 @@ int echotalk_set_repeat_filter(echotalk *et, int t) {
  * Ctrl-E traffic and does not dirty the settings block. 255 is an
  * arbitrary ceiling: anything past Textalker's ~80-character line is
  * already unverified territory, and 0 leaves it entirely. */
+static size_t engine_chunk(const echotalk *et);
+
 int echotalk_set_chunk_size(echotalk *et, unsigned chars) {
-    if (chars > 255) return -1;
+    /* The bound is the largest buffer the native engine can be given,
+     * not Textalker's own 256: an extended buffer takes longer lines
+     * and a host is allowed to ask for them. */
+    if (chars > TK_BUFSZ_MAX - 16) return -1;
     et->chunk_size = chars;
+    et->chunk_pinned = 1;
     return 0;
+}
+
+int echotalk_reset_chunk_size(echotalk *et) {
+    et->chunk_pinned = 0;
+    et->chunk_size = engine_chunk(et);
+    return (int)et->chunk_size;
 }
 unsigned echotalk_chunk_size(const echotalk *et) {
     return (unsigned)et->chunk_size;
@@ -489,6 +889,130 @@ int echotalk_set_index_break(echotalk *et, int on) {
     return 0;
 }
 int echotalk_index_break(const echotalk *et) { return et->index_break; }
+
+/* The chunk window this engine can take. See DEFAULT_CHUNK above.
+ *
+ * It scales with the line buffer, because that is what bounds it: the
+ * numbers above were measured against Textalker's own 256 bytes, and a
+ * buffer twice the size takes twice the text. */
+static size_t engine_chunk(const echotalk *et) {
+    size_t base;
+    if (et->engine != ECHOTALK_ENGINE_NATIVE || !et->tk_ready)
+        return DEFAULT_CHUNK;
+    base = et->tk_img.p.syllabifier ? NATIVE_CHUNK_SYL : NATIVE_CHUNK_PLAIN;
+    return base * (size_t)et->tk_mach.bufsz / TK_BUFSZ;
+}
+
+int echotalk_set_engine(echotalk *et, int engine) {
+    if (engine != ECHOTALK_ENGINE_EMULATED
+        && !(engine == ECHOTALK_ENGINE_NATIVE && et->tk_ready))
+        return -1;
+    /* EACH ENGINE HOLDS ITS OWN COPY OF TEXTALKER'S VOICE STATE, so the
+     * settings have to be pushed again to whichever one is now
+     * listening. They are Ctrl-E commands in the input stream, and the
+     * stream goes to one engine at a time: everything sent before this
+     * point reached the other one's Textalker and this one has never
+     * seen it.
+     *
+     * Without this, switching engines mid-session silently reverted
+     * pitch, volume, word delay, the repeat filter and compressed
+     * speech to Textalker's own startup values -- while every getter
+     * went on reporting what the caller had asked for, so the host's UI
+     * was right and the speech was not. Jayson hit it with compressed
+     * speech: the box stayed ticked and the voice slowed down, and
+     * un-ticking and re-ticking it was the only way back, because that
+     * is what marked the settings dirty again.
+     *
+     * Marking rather than pushing, because apply_settings() runs before
+     * the next utterance: a push here would put the commands in front
+     * of audio that has already been queued. */
+    if (engine != et->engine) et->settings_dirty = 1;
+    et->engine = engine;
+    /* The chunk window belongs to the engine, so it follows the engine
+     * -- unless a host has set one of its own, in which case that is a
+     * deliberate choice and outranks this. */
+    if (!et->chunk_pinned) et->chunk_size = engine_chunk(et);
+    return 0;
+}
+
+int echotalk_engine(const echotalk *et) { return et->engine; }
+
+/* --- the extended line buffer ---------------------------------------- */
+
+/* Textalker's line buffer is 256 bytes and it speaks when 240 of them
+ * are used. That is a 1981 constraint rather than anything about the
+ * speech, and the native engine need not keep it -- but it DOES keep
+ * it by default, because reproducing Textalker exactly is what makes
+ * the rewrite trustworthy, and three audible behaviours depend on the
+ * size. echotalk.h lists them.
+ *
+ * So this is opt-in, and it is a stated divergence rather than an
+ * improvement with no cost. The chunk window follows it, which is the
+ * whole point: at 1024 bytes a chunk is four times longer and most
+ * paragraphs go out in one piece. */
+int echotalk_set_buffer_size(echotalk *et, unsigned bytes) {
+    if (!et->tk_ready) return -1;
+    if (tk_machine_set_buffer_size(&et->tk_mach, (int)bytes) != 0) return -1;
+    if (!et->chunk_pinned) et->chunk_size = engine_chunk(et);
+    return 0;
+}
+
+unsigned echotalk_buffer_size(const echotalk *et) {
+    return et->tk_ready ? (unsigned)et->tk_mach.bufsz : 0;
+}
+
+/* --- the letter-to-sound seam --------------------------------------- */
+
+/* The native engine's stage 1 is replaceable, which is what the rewrite
+ * was for. A dictionary is the first thing to go in it: the words it
+ * knows it speaks, and everything else -- unknown words, punctuation,
+ * the spaces between -- still goes through Textalker's own rules, so
+ * the voice, the intonation and the spoken punctuation names are
+ * unchanged. A dictionary that matched nothing would produce
+ * byte-identical audio to none at all.
+ *
+ * EchoTalk SHIPS NO DICTIONARY. The file is the caller's, read at run
+ * time, exactly as the Textalker image is -- which is also what keeps
+ * the licensing simple: whatever terms the dictionary carries are the
+ * user's business, not a term of EchoTalk's own. */
+int echotalk_load_dictionary(echotalk *et, const char *path,
+                             char *errbuf, size_t errbuf_len) {
+    tk_dict *d;
+    char err[256];
+    if (!et->tk_ready) {
+        if (errbuf && errbuf_len)
+            snprintf(errbuf, errbuf_len,
+                     "the native engine does not recognise this image");
+        return -1;
+    }
+    if (!path) {
+        tk_machine_set_g2p(&et->tk_mach, NULL);
+        tk_dict_free(et->tk_dict_inst);
+        et->tk_dict_inst = NULL;
+        return 0;
+    }
+    d = tk_dict_open(&et->tk_img, path, err, sizeof err);
+    if (!d) {
+        if (errbuf && errbuf_len) snprintf(errbuf, errbuf_len, "%s", err);
+        return -1;
+    }
+    tk_dict_free(et->tk_dict_inst);
+    et->tk_dict_inst = d;
+    tk_machine_set_g2p(&et->tk_mach, tk_dict_g2p(d));
+    return 0;
+}
+
+long echotalk_dictionary_entries(const echotalk *et) {
+    return tk_dict_entries(et->tk_dict_inst);
+}
+
+long echotalk_dictionary_hits(const echotalk *et) {
+    return tk_dict_hits(et->tk_dict_inst);
+}
+
+long echotalk_dictionary_misses(const echotalk *et) {
+    return tk_dict_misses(et->tk_dict_inst);
+}
 
 int echotalk_set_raw(echotalk *et, int raw) {
     if (raw != 0 && raw != 1) return -1;
@@ -527,11 +1051,29 @@ static void apply_settings(echotalk *et) {
      * monotone. Sending "%dP" unconditionally, as this used to, threw
      * away any flatness the text had asked for. */
     snprintf(cmd, sizeof cmd, "\x05%d%c", et->pitch, et->flat ? 'F' : 'P');
-    send_string(et, cmd);
-    snprintf(cmd, sizeof cmd, "\x05%dV", et->volume);        send_string(et, cmd);
-    snprintf(cmd, sizeof cmd, "\x05%dD", et->word_delay);    send_string(et, cmd);
-    snprintf(cmd, sizeof cmd, "\x05%dR", et->repeat_filter); send_string(et, cmd);
-    send_string(et, et->compressed ? "\x05" "C" : "\x05" "E");
+    feed_string(et, cmd);
+    snprintf(cmd, sizeof cmd, "\x05%dV", et->volume);        feed_string(et, cmd);
+    snprintf(cmd, sizeof cmd, "\x05%dD", et->word_delay);    feed_string(et, cmd);
+    snprintf(cmd, sizeof cmd, "\x05%dR", et->repeat_filter); feed_string(et, cmd);
+    feed_string(et, et->compressed ? "\x05" "C" : "\x05" "E");
+    /* Letter mode and punctuation, but only once a caller has actually
+     * chosen them -- see modes_chosen, and echotalk.h, which promises
+     * exactly this. Nothing used to read modes_chosen, so both setters
+     * moved the library's idea of the modes without ever telling
+     * Textalker: the value came back from the getter, and survived a
+     * one-character utterance's restore, and did nothing else.
+     *
+     * The guard is what keeps this off every other caller's byte
+     * stream, which is why it is not simply sent with the rest. */
+    if (et->modes_chosen) {
+        char m[5];
+        m[0] = 0x05;
+        m[1] = et->punctuation == 2 ? 'A' : et->punctuation == 0 ? 'N' : 'S';
+        m[2] = 0x05;
+        m[3] = et->letter_mode ? 'L' : 'W';
+        m[4] = 0;
+        feed_string(et, m);
+    }
     et->settings_dirty = 0;
 }
 
@@ -622,8 +1164,8 @@ static void sniff_ctrl_e(echotalk *et, const char *s, size_t len) {
  * mode, since it was buffered ahead of the restore. */
 static void send_utterance(echotalk *et, const char *s, size_t len) {
     int single = (len == 1);
-    if (single) send_string(et, "\x05L\x05" "A");
-    for (size_t i = 0; i < len; i++) send_char(et, (uint8_t)s[i]);
+    if (single) feed_string(et, "\x05L\x05" "A");
+    feed_bytes(et, s, len);
     if (single) {
         char restore[5];
         restore[0] = 0x05;
@@ -631,9 +1173,9 @@ static void send_utterance(echotalk *et, const char *s, size_t len) {
         restore[2] = 0x05;
         restore[3] = et->letter_mode ? 'L' : 'W';
         restore[4] = 0;
-        send_string(et, restore);
+        feed_string(et, restore);
     }
-    send_char(et, '\r');
+    { char cr = 13; feed_bytes(et, &cr, 1); }
 }
 
 /* Speaks one utterance and finishes its audio off completely: drained,
@@ -787,7 +1329,9 @@ static int apply_drv_cmd(echotalk *et, char letter, int has_value, double value)
     case 'S': case 's':                       /* speed, pitch-preserving */
         return echotalk_set_speed(et, has_value ? value : 1.0);
     case 'B': case 'b':                       /* line buffer / chunking */
-        if (!has_value) return echotalk_set_chunk_size(et, DEFAULT_CHUNK);
+        /* No number means "back to this engine's own default", not
+         * "back to 80" -- the two are different now. */
+        if (!has_value) { echotalk_reset_chunk_size(et); return 0; }
         if (drv_int(value, &n)) return -1;
         return echotalk_set_chunk_size(et, (unsigned)n);
     case 'R': case 'r':                       /* raw text passthrough  */

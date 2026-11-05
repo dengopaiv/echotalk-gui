@@ -17,7 +17,7 @@ import struct
 import time
 import sys
 
-EXPECTED_ABI = 6
+EXPECTED_ABI = 12
 
 
 class Failures:
@@ -69,6 +69,14 @@ def declare(lib):
 
     lib.echotalk_chunk_size.restype = ctypes.c_uint
     lib.echotalk_chunk_size.argtypes = [p]
+    lib.echotalk_reset_chunk_size.restype = ctypes.c_int
+    lib.echotalk_reset_chunk_size.argtypes = [p]
+    lib.echotalk_set_buffer_size.restype = ctypes.c_int
+    lib.echotalk_set_buffer_size.argtypes = [p, ctypes.c_uint]
+    lib.echotalk_buffer_size.restype = ctypes.c_uint
+    lib.echotalk_buffer_size.argtypes = [p]
+    lib.echotalk_set_engine.restype = ctypes.c_int
+    lib.echotalk_set_engine.argtypes = [p, ctypes.c_int]
     for name in ("pitch", "flat", "volume", "word_delay", "repeat_filter",
                  "compressed", "letter_mode", "punctuation", "frame_rate", "raw"):
         fn = getattr(lib, "echotalk_" + name)
@@ -218,8 +226,91 @@ def main():
         f.check("set_raw(0)", lib.echotalk_set_raw(et, 0) == 0)
         f.check("set_chunk_size(0)", lib.echotalk_set_chunk_size(et, 0) == 0)
         f.check("chunk_size reads back 0", lib.echotalk_chunk_size(et) == 0)
-        f.check("set_chunk_size(999) rejected", lib.echotalk_set_chunk_size(et, 999) == -1)
+        # The bound is the largest extended buffer, not Textalker's 256:
+        # 999 is a legal chunk once the buffer is big enough to hold it.
+        f.check("set_chunk_size(999) accepted",
+                lib.echotalk_set_chunk_size(et, 999) == 0)
+        f.check("set_chunk_size(5000) rejected",
+                lib.echotalk_set_chunk_size(et, 5000) == -1)
         f.check("set_chunk_size(80)", lib.echotalk_set_chunk_size(et, 80) == 0)
+
+        # The chunk window belongs to the ENGINE. The emulated one loses
+        # text past 79 characters, because nothing here plays the part of
+        # DOS setting up a screen; the native one is bounded only by
+        # Textalker's own 240-byte line buffer, so it gets a much longer
+        # window. A host that sets its own pins it against both.
+        lib.echotalk_reset_chunk_size(et)
+        emulated = lib.echotalk_chunk_size(et)
+        f.check("emulated chunk window", emulated == 80, str(emulated))
+        if lib.echotalk_set_engine(et, 1) == 0:
+            native = lib.echotalk_chunk_size(et)
+            f.check("native chunk window is larger", native > emulated,
+                    f"{emulated} -> {native}")
+            lib.echotalk_set_chunk_size(et, 50)
+            lib.echotalk_set_engine(et, 0)
+            lib.echotalk_set_engine(et, 1)
+            f.check("a host's own chunk size survives an engine change",
+                    lib.echotalk_chunk_size(et) == 50)
+            f.check("reset_chunk_size gives the engine's own back",
+                    lib.echotalk_reset_chunk_size(et) == native)
+            lib.echotalk_set_engine(et, 0)
+            f.check("...and it follows the engine back down",
+                    lib.echotalk_chunk_size(et) == emulated)
+        else:
+            f.check("native engine available", False,
+                    "this image has none, so the window was not tested")
+        # The extended line buffer. Textalker's own is 256 bytes and the
+        # port keeps it by default; a host may ask for more, and the
+        # chunk window scales with it.
+        f.check("buffer defaults to Textalker's own 256",
+                lib.echotalk_buffer_size(et) == 256,
+                str(lib.echotalk_buffer_size(et)))
+        f.check("a buffer smaller than 256 is refused",
+                lib.echotalk_set_buffer_size(et, 128) == -1)
+        f.check("a buffer past the maximum is refused",
+                lib.echotalk_set_buffer_size(et, 8192) == -1)
+        if lib.echotalk_set_engine(et, 1) == 0:
+            lib.echotalk_reset_chunk_size(et)
+            small = lib.echotalk_chunk_size(et)
+            f.check("buffer grows", lib.echotalk_set_buffer_size(et, 1024) == 0)
+            f.check("buffer reads back", lib.echotalk_buffer_size(et) == 1024)
+            big = lib.echotalk_chunk_size(et)
+            f.check("the chunk window scales with the buffer",
+                    big == small * 4, f"{small} -> {big}")
+
+            lib.echotalk_set_buffer_size(et, 256)
+            lib.echotalk_set_engine(et, 0)
+        lib.echotalk_set_chunk_size(et, 80)
+
+        # A Ctrl-E setting must survive an engine change. Each engine
+        # keeps its own copy of Textalker's voice state, and the
+        # settings reach it as commands in the input stream -- which
+        # goes to one engine at a time. So everything pushed before a
+        # switch went to the OTHER engine's Textalker, and the library
+        # has to push it again. Jayson found this with compressed
+        # speech: the setting read back as on, the box stayed ticked and
+        # the speech was expanded.
+        if lib.echotalk_set_engine(et, 1) == 0:
+            lib.echotalk_set_engine(et, 0)
+            phrase = "Testing the compressed speech setting, one two three."
+            lib.echotalk_set_compressed(et, 1)
+            speak(lib, et, "Warming up.")       # pushes it to the 6502
+            lib.echotalk_set_engine(et, 1)
+            carried = len(speak(lib, et, phrase))
+            lib.echotalk_set_compressed(et, 0)
+            expanded = len(speak(lib, et, phrase))
+            lib.echotalk_set_compressed(et, 1)
+            asserted = len(speak(lib, et, phrase))
+            # Lengths, not samples: compressed speech drops segments, so
+            # it is dramatically shorter, while voice carry moves the
+            # exact samples by a few either way.
+            f.check("compressed speech survives an engine change",
+                    carried < expanded * 0.8
+                    and abs(carried - asserted) < asserted * 0.02,
+                    f"{carried // 2} samples carried, {asserted // 2} when "
+                    f"re-asserted, {expanded // 2} expanded")
+            lib.echotalk_set_compressed(et, 0)
+            lib.echotalk_set_engine(et, 0)
 
         # The double actually taking effect, not merely being accepted:
         # a clock multiplier passed as garbage would still return 0.
@@ -513,6 +604,19 @@ def main():
         f.check("single character preserves punctuation mode",
                 before == 2 and lib.echotalk_punctuation(et) == 2,
                 f"{before} -> {lib.echotalk_punctuation(et)}")
+        # ...and the setter must actually reach Textalker, which for a
+        # long time it did not: it moved the library's copy of the mode
+        # and nothing sent the command, so the getter agreed with the
+        # caller and the speech did not.
+        lib.echotalk_set_punctuation(et, 1)
+        some = speak(lib, et, "a, b")
+        lib.echotalk_set_punctuation(et, 2)
+        every = speak(lib, et, "a, b")
+        f.check("punctuation mode reaches Textalker",
+                len(every) > len(some) * 1.5,
+                f"{len(some) // 2} samples at some, {len(every) // 2} at all "
+                f"-- the comma is spoken by name")
+
         lib.echotalk_set_punctuation(et, 1)
         lib.echotalk_set_letter_mode(et, 0)
         lib.echotalk_set_compressed(et, 0)
@@ -538,6 +642,50 @@ def main():
     f.check("create again after destroy", bool(et2), err3.value.decode())
     if et2:
         lib.echotalk_destroy(et2)
+
+    # A bigger line buffer must not perturb speech that never goes near
+    # the limit. That is an equality claim -- the same code path on the
+    # same input -- so it is checked as one.
+    #
+    # It needs a FRESH instance per size. The voice carry (pitch, group,
+    # the previous frame, even the 6502's X register) persists across
+    # utterances by design, so rendering twice on one instance compares
+    # a cold utterance with a warm one and they are legitimately
+    # different. Getting that wrong is the same mistake as asserting
+    # equality of two renderings that differ by a phase shift.
+    def render_at(bytes_):
+        e = ctypes.create_string_buffer(256)
+        h = lib.echotalk_create(loader.encode("mbcs"), obj.encode("mbcs"),
+                                e, len(e))
+        if not h:
+            return None
+        pcm = (ctypes.c_int16 * 4096)()
+        out = bytearray()
+        try:
+            if lib.echotalk_set_engine(h, 1) != 0:
+                return None
+            if bytes_ != 256 and lib.echotalk_set_buffer_size(h, bytes_) != 0:
+                return None
+            lib.echotalk_speak(h, b"The quick brown fox jumps over the dog.")
+            while True:
+                n = lib.echotalk_read(h, pcm, 4096)
+                if n <= 0:
+                    break
+                out += bytes(bytearray(pcm)[:n * 2])
+        finally:
+            lib.echotalk_destroy(h)
+        return bytes(out)
+
+    base = render_at(256)
+    if base is None:
+        f.check("native engine available for the buffer check", False,
+                "this image has none")
+    else:
+        for size in (512, 1024, 4096):
+            other = render_at(size)
+            f.check(f"a short utterance is identical at 256 and {size}",
+                    other == base,
+                    f"{len(base) // 2} vs {len(other or b'') // 2} samples")
 
     print()
     if f.count:

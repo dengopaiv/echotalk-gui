@@ -76,11 +76,25 @@ SOURCES_WAVSTATS = tools/wav_stats.c
 
 # The library and the tool that drives it. This is the thing anyone
 # else is actually meant to run.
-LIB_SOURCES = src/echotalk.c src/text_prep.c src/chunker.c src/resample.c \
+# The native Textalker: branch Textalker-RW's C port of the speech path,
+# a translation of the transcriptions in tools/*.py. No table is
+# compiled in -- everything is read out of the user's own image at run
+# time, exactly as the emulation path does.
+TK_SOURCES = src/tk_image.c src/tk_syllable.c src/tk_rules.c src/tk_synth.c src/tk_machine.c src/tk_arpabet.c src/tk_dict.c
+DSK_SOURCES = src/dsk.c src/tk_disk.c src/tk_image.c
+
+LIB_SOURCES = src/echotalk.c src/dsk.c src/tk_disk.c src/text_prep.c src/chunker.c src/resample.c \
               third_party/fake6502/fake6502.c \
               third_party/tms5220_core/tms5220_core.c \
-              third_party/tms5220_core/tms5220_reset.c
+              third_party/tms5220_core/tms5220_reset.c \
+              $(TK_SOURCES)
 SOURCES_SAY = tools/say.c $(LIB_SOURCES)
+
+SOURCES_TK_PHONEMES = tools/tk_phonemes.c $(TK_SOURCES)
+SOURCES_TK_CHIP = tools/tk_chip.c $(TK_SOURCES)
+SOURCES_TK_EXTRACT = tools/tk_extract.c $(DSK_SOURCES)
+SOURCES_TK_PROFILE = tools/tk_profile.c $(DSK_SOURCES)
+SOURCES_TEST_DSK = tools/test_dsk.c $(DSK_SOURCES)
 
 # Pure-logic unit tests, no emulator involved.
 SOURCES_TEST_PREP = tools/test_text_prep.c src/text_prep.c
@@ -133,6 +147,10 @@ BUILD_DIR = build
 all: native
 
 native: $(BUILD_DIR)/native/say \
+        $(BUILD_DIR)/native/tk_phonemes \
+        $(BUILD_DIR)/native/tk_chip \
+        $(BUILD_DIR)/native/tk_extract \
+        $(BUILD_DIR)/native/tk_profile \
         $(BUILD_DIR)/native/render_text_loader \
         $(BUILD_DIR)/native/render_text_real_chip \
         $(BUILD_DIR)/native/render_v13 \
@@ -314,6 +332,26 @@ $(BUILD_DIR)/native/wav_stats: $(SOURCES_WAVSTATS)
 	mkdir -p $(BUILD_DIR)/native
 	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_WAVSTATS)
 
+$(BUILD_DIR)/native/tk_phonemes: $(SOURCES_TK_PHONEMES) src/tk.h
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_TK_PHONEMES)
+
+$(BUILD_DIR)/native/tk_chip: $(SOURCES_TK_CHIP) src/tk.h
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_TK_CHIP)
+
+$(BUILD_DIR)/native/tk_extract: $(SOURCES_TK_EXTRACT) src/tk.h src/dsk.h src/tk_disk.h
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_TK_EXTRACT)
+
+$(BUILD_DIR)/native/tk_profile: $(SOURCES_TK_PROFILE) src/tk.h src/dsk.h src/tk_disk.h
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_TK_PROFILE)
+
+$(BUILD_DIR)/native/test_dsk: $(SOURCES_TEST_DSK) src/tk.h src/dsk.h src/tk_disk.h
+	mkdir -p $(BUILD_DIR)/native
+	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_TEST_DSK)
+
 $(BUILD_DIR)/native/test_text_prep: $(SOURCES_TEST_PREP)
 	mkdir -p $(BUILD_DIR)/native
 	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_TEST_PREP)
@@ -323,10 +361,12 @@ $(BUILD_DIR)/native/test_chunker: $(SOURCES_TEST_CHUNKER)
 	$(CC_NATIVE) $(CFLAGS_COMMON) -o $@ $(SOURCES_TEST_CHUNKER)
 
 # Runs the pure-logic unit tests. Does not need any ROM.
-test: $(BUILD_DIR)/native/test_text_prep $(BUILD_DIR)/native/test_chunker
+test: $(BUILD_DIR)/native/test_text_prep $(BUILD_DIR)/native/test_chunker $(BUILD_DIR)/native/test_dsk
 	@$(BUILD_DIR)/native/test_text_prep
 	@echo
 	@$(BUILD_DIR)/native/test_chunker
+	@echo
+	@$(BUILD_DIR)/native/test_dsk
 
 clean:
 	rm -rf $(BUILD_DIR)

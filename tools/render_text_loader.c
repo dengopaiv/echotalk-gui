@@ -219,6 +219,12 @@ static void echoii_readyq(void *ctx, int state) {
     tms5220_wsq_w(&tms, 1, 0);
 }
 
+/* Read watch (ECHOTALK_READ_WATCH=<lo>-<hi>, hex): logs reads from the
+ * language-card RAM in a range, with the issuing PC. Used to see which
+ * letter-to-sound rule the engine actually consults. Diagnostic only. */
+static int read_watch = 0;
+static uint16_t read_watch_lo = 0, read_watch_hi = 0;
+
 uint8_t read6502(uint16_t address) {
     if (address >= 0xC0A0 && address <= 0xC0AF) {
         uint8_t retval;
@@ -237,6 +243,8 @@ uint8_t read6502(uint16_t address) {
     if (address == 0xC08A) { if (bank_trace && lc_ram_enabled) fprintf(stderr, "[bank] PC=$%04X -> ROM\n", pc); lc_ram_enabled = 0; return 0; }
     if (is_lc_space(address) && !lc_ram_enabled)
         return rom_shadow[address - 0xD000];
+    if (read_watch && address >= read_watch_lo && address <= read_watch_hi)
+        fprintf(stderr, "[rd] $%04X = %02X  PC=$%04X\n", address, mem[address], pc);
     return mem[address];
 }
 
@@ -245,10 +253,50 @@ uint8_t read6502(uint16_t address) {
  * MAME's own "Data written to latch of %02x" log lines, which is how
  * the two implementations' Textalker behaviour gets compared. */
 static FILE *byte_dump = NULL;
+static FILE *cycle_dump = NULL;
+
+/* ECHOTALK_CYCLE_PROFILE=<file>: cycles spent per 256-byte page of the
+ * language card, so the native engine's cycle model can be aimed at
+ * whatever actually dominates instead of at guesses. Diagnostic only. */
+static unsigned long cycle_page[256];
+static int cycle_profile = 0;
+
+/* RAM write watch (ECHOTALK_RAM_WATCH=<lo>-<hi>, hex). Logs every write
+ * landing in the range, with the PC that issued it, so an internal
+ * buffer can be located by watching what gets filled. Diagnostic only:
+ * off unless the variable is set, and it touches nothing when off. */
+/* Phoneme-buffer dump (ECHOTALK_PHONEME_DUMP=<file>). Textalker turns
+ * text into a string of one-byte phoneme codes before it builds any LPC
+ * frame, and that string is the natural checkpoint for comparing a
+ * native-C text-to-phoneme stage against the real thing.
+ *
+ * The buffer base differs by version -- $FEAD in 3.1.3, $F492 in 1.3 --
+ * and both were found empirically by watching which addresses receive
+ * the codes a decoded rule predicts. Both are watched rather than
+ * branching on version, so this needs no version knowledge, in keeping
+ * with the rest of this harness. The alphabet itself is shared: "CAT"
+ * is 61 24 63 under both. $1A terminates a string, $19 separates words.
+ *
+ * Diagnostic only. Off unless the variable is set. */
+static FILE *phoneme_dump = NULL;
+static int phoneme_locked = -1;
+static unsigned phoneme_len = 0;
+#define PHONEME_BASE_COUNT 2
+static const uint16_t phoneme_bases[PHONEME_BASE_COUNT] = { 0xFEAD, 0xF492 };
+
+static int ram_watch = 0;
+static uint16_t ram_watch_lo = 0, ram_watch_hi = 0;
 
 void write6502(uint16_t address, uint8_t value) {
     if (address >= 0xC0A0 && address <= 0xC0AF) {
         if (byte_dump) fprintf(byte_dump, "%02x ", value);
+        /* ECHOTALK_CYCLE_DUMP: the 6502 cycle count at every
+         * chip write. Ground truth for the native engine's cycle
+         * model -- what has to be reproduced is not the bytes,
+         * which already match, but when each one arrives. */
+        if (cycle_dump)
+            fprintf(cycle_dump, "%02x %lu\n", value,
+                    (unsigned long)clockticks6502);
         /* Arrival phase (ECHOTALK_ARRIVAL=1), in the same shape as the
          * instrumentation added to MAME's tms5220.cpp data_w, so the
          * two runs can be compared byte for byte. What matters is the
@@ -278,6 +326,31 @@ void write6502(uint16_t address, uint8_t value) {
     /* Writes always land in RAM, as on real hardware where the ROM
      * bank is read-only -- so Textalker's image is never corrupted by
      * a write issued while the ROM bank happens to be selected. */
+    if (phoneme_dump) {
+        /* Record only the contiguous phoneme string itself: a write at
+         * base+len appends, a write below len is a back-patch (the
+         * stress pass at $E2D8/$E2EF rewrites bytes it already
+         * emitted), and anything else in the page is some other
+         * variable and is ignored. A fixed 256-byte window is not
+         * enough on its own -- an unrelated counter sits exactly 255
+         * bytes above the base in BOTH versions and interleaves
+         * itself with the phonemes. */
+        int i;
+        if (phoneme_locked < 0)
+            for (i = 0; i < PHONEME_BASE_COUNT; i++)
+                if (address == phoneme_bases[i]) { phoneme_locked = i; break; }
+        if (phoneme_locked >= 0) {
+            uint16_t b = phoneme_bases[phoneme_locked];
+            if (address >= b && address <= b + phoneme_len) {
+                unsigned off = (unsigned)(address - b);
+                if (off == phoneme_len) phoneme_len++;
+                fprintf(phoneme_dump, "%02x:%02x ", off, value);
+                if (value == 0x1A) { fputc('\n', phoneme_dump); phoneme_len = 0; }
+            }
+        }
+    }
+    if (ram_watch && address >= ram_watch_lo && address <= ram_watch_hi)
+        fprintf(stderr, "[ram] $%04X <- %02X  PC=$%04X\n", address, value, pc);
     mem[address] = value;
 }
 
@@ -316,8 +389,10 @@ static int run_to_halt(uint16_t entry, int max_steps, uint16_t halt_addr,
             fprintf(stderr, "[pc] reached $%04X (A=%02X X=%02X Y=%02X)\n", pc, a, x, y);
         }
         uint32_t before = clockticks6502;
+        uint16_t at = pc;
         step6502(0);
         uint32_t elapsed = clockticks6502 - before;
+        if (cycle_profile) cycle_page[at >> 8] += elapsed;
         tick_chip(elapsed);
         check_wild_jump_trap();
         steps++;
@@ -384,6 +459,21 @@ int main(int argc, char **argv) {
     arrival_trace = getenv("ECHOTALK_ARRIVAL") != NULL;
     { const char *bd = getenv("ECHOTALK_BYTE_DUMP");
       if (bd) byte_dump = fopen(bd, "w"); }
+    { const char *cy = getenv("ECHOTALK_CYCLE_DUMP");
+      if (cy) cycle_dump = fopen(cy, "w"); }
+    cycle_profile = getenv("ECHOTALK_CYCLE_PROFILE") != NULL;
+    { const char *pd = getenv("ECHOTALK_PHONEME_DUMP");
+      if (pd) phoneme_dump = fopen(pd, "w"); }
+    { const char *qw = getenv("ECHOTALK_READ_WATCH");
+      unsigned lo, hi;
+      if (qw && sscanf(qw, "%x-%x", &lo, &hi) == 2) {
+          read_watch = 1; read_watch_lo = (uint16_t)lo; read_watch_hi = (uint16_t)hi;
+      } }
+    { const char *rw = getenv("ECHOTALK_RAM_WATCH");
+      unsigned lo, hi;
+      if (rw && sscanf(rw, "%x-%x", &lo, &hi) == 2) {
+          ram_watch = 1; ram_watch_lo = (uint16_t)lo; ram_watch_hi = (uint16_t)hi;
+      } }
     { const char *w = getenv("ECHOTALK_PC_WATCH"); if (w) pc_watch = (uint16_t)strtol(w, NULL, 16); }
     { const char *hz = getenv("ECHOTALK_CPU_HZ");
       if (hz) { cycles_per_sample = atof(hz) / CHIP_HZ;
@@ -634,6 +724,15 @@ int main(int argc, char **argv) {
         VLOG("Sent repeat-filter disable (Ctrl-E 99 R)\n");
     }
 
+    /* Per-character step budget. This was 5,000,000 -- the same number
+     * src/echotalk.c records as FAR too low, for the same reason: a
+     * runaway rule that consumes past the end of the buffer emits 240
+     * phonemes for a two-letter word, which is half a minute of speech
+     * from one character. The harness truncated those in a warning that
+     * nothing was reading, so tools/byte_diff.py counted the emulator's
+     * own truncation as a disagreement with the port. Matched to the
+     * library's 64,000,000. */
+#define STEP_BUDGET 64000000
     for (long i = 0; i < tlen; i++) {
         uint8_t ch = text[i] | 0x80;
         /* A new utterance begins at the start of the text and after
@@ -642,8 +741,8 @@ int main(int argc, char **argv) {
         if (i == 0 || text[i - 1] == '\r') render_mark_utterance();
         sp = 0xFD;
         a = ch;
-        int s = run_to_halt(entry, 5000000, 0x0201, 0, 0);
-        if (s >= 5000000) {
+        int s = run_to_halt(entry, STEP_BUDGET, 0x0201, 0, 0);
+        if (s >= STEP_BUDGET) {
             fprintf(stderr, "WARNING: char #%ld ($%02X) hit step budget -- may be incomplete\n", i, ch);
         }
         if (g_ropts.verbose) {
@@ -661,6 +760,17 @@ int main(int argc, char **argv) {
     }
 
     fprintf(stderr, "  frames played: %lu\n", frames_played);
+    if (cycle_profile) {
+        int pg;
+        unsigned long tot = 0;
+        for (pg = 0; pg < 256; pg++) tot += cycle_page[pg];
+        for (pg = 0; pg < 256; pg++)
+            if (cycle_page[pg] * 200 > tot)
+                fprintf(stderr, "  $%02X00  %10lu cycles  %5.1f%%\n",
+                        pg, cycle_page[pg],
+                        100.0 * cycle_page[pg] / (tot ? tot : 1));
+        fprintf(stderr, "  total %lu cycles\n", tot);
+    }
     if (poll_trace) {
         for (int i = 0; i < 0x10000; i++)
             if (poll_pc_count[i] > 0)

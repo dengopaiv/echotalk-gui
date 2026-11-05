@@ -5,7 +5,9 @@
 #
 # Files expected next to this __init__.py:
 #   echotalk64.dll / echotalk32.dll   built with `make dll`
-#   <name>.ram.bin + <name>.obj.bin   one pair per Textalker version.
+#   <name>.ram.bin + <name>.obj.bin   one pair per Textalker version,
+#   <name>.dsk / .do / .po / .2mg     or the Apple II floppy image itself,
+#                                     which the library reads directly.
 #                                     Proprietary to Street Electronics
 #                                     (3.1.3 also carries an American
 #                                     Printing House for the Blind
@@ -47,7 +49,14 @@ SAMPLES_PER_READ = 1024
 
 # The ABI this driver was written against. echotalk_abi_version() is the
 # only check available to a host that loads the library at runtime.
-REQUIRED_ABI = 6
+#
+# BUMP THIS WITH THE LIBRARY. It sat at 6 through two ABI bumps and the
+# driver simply refused to load against a current DLL -- which nothing
+# caught, because the DLL's own tests check the number and the driver
+# test was not being run. It is exact rather than a minimum on purpose:
+# the library's rule is to bump on any surface change, so "newer" is not
+# by itself "compatible", and the two ship together anyway.
+REQUIRED_ABI = 12
 
 # The library's own ranges, which every slider below converts to and from.
 PITCH_MAX = 63          # Textalker nP
@@ -118,12 +127,27 @@ def _dllName():
 	return "echotalk64.dll" if ctypes.sizeof(ctypes.c_void_p) == 8 else "echotalk32.dll"
 
 
-def _imagePairs():
-	"""Finds Textalker image pairs sitting next to this file.
+_DISK_SUFFIXES = (".dsk", ".do", ".po", ".2mg")
 
-	A pair is <stem>.ram.bin (or <stem>.loader.bin) plus <stem>.obj.bin,
-	matching the names the project's own roms/ directory uses. Returns
-	[(stem, loader, obj)], sorted so the voice order is stable.
+# The two engines. Both run the same Textalker image and say the same
+# words; the user documentation covers what actually differs.
+ENGINE_EMULATED = 0
+ENGINE_NATIVE = 1
+
+DICT_NONE = "(none)"
+
+# Textalker's own line buffer is 256 bytes. The native engine can be
+# given more, which lets a chunk be correspondingly longer; the trade is
+# in the user documentation and in echotalk.h.
+BUFFER_SIZES = ("256", "512", "1024", "4096")
+
+
+def _dictionaries():
+	"""Pronunciation dictionaries sitting next to this file.
+
+	Any <name>.dict is offered. They are CMUdict-format text files, and
+	only the native engine consults one -- the emulated engine runs the
+	real 6502, which has nowhere to put a dictionary.
 	"""
 	found = []
 	try:
@@ -131,6 +155,35 @@ def _imagePairs():
 	except OSError:
 		return found
 	for name in names:
+		if name.lower().endswith(".dict"):
+			found.append(name[:-len(".dict")])
+	return found
+
+
+def _imagePairs():
+	"""Finds Textalker images sitting next to this file.
+
+	Two shapes count. A PAIR is <stem>.ram.bin (or <stem>.loader.bin) plus
+	<stem>.obj.bin, matching the names the project's own roms/ directory
+	uses. A DISK IMAGE is any <stem>.dsk/.do/.po/.2mg, which the library
+	opens directly -- so a user can drop the Apple II floppy image in here
+	and skip extracting anything at all, which is the whole point of
+	echotalk_create_from_disk().
+
+	Returns [(stem, path, objOrNone)], sorted so the voice order is
+	stable; obj is None for a disk image.
+	"""
+	found = []
+	try:
+		names = sorted(os.listdir(_DIR))
+	except OSError:
+		return found
+	for name in names:
+		lower = name.lower()
+		if lower.endswith(_DISK_SUFFIXES):
+			stem = name.rsplit(".", 1)[0]
+			found.append((stem, os.path.join(_DIR, name), None))
+			continue
 		for suffix in (".ram.bin", ".loader.bin"):
 			if not name.endswith(suffix):
 				continue
@@ -186,6 +239,28 @@ class _EchoTalkDLL:
 		lib.echotalk_create.restype = p
 		lib.echotalk_create.argtypes = [
 			ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+		lib.echotalk_create_from_disk.restype = p
+		lib.echotalk_create_from_disk.argtypes = [
+			ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+		lib.echotalk_create_from_disk_version.restype = p
+		lib.echotalk_create_from_disk_version.argtypes = [
+			ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+		lib.echotalk_disk_versions.restype = ctypes.c_int
+		lib.echotalk_disk_versions.argtypes = [
+			ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+		lib.echotalk_set_engine.restype = ctypes.c_int
+		lib.echotalk_set_engine.argtypes = [p, ctypes.c_int]
+		lib.echotalk_engine.restype = ctypes.c_int
+		lib.echotalk_engine.argtypes = [p]
+		lib.echotalk_load_dictionary.restype = ctypes.c_int
+		lib.echotalk_load_dictionary.argtypes = [
+			p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+		lib.echotalk_dictionary_entries.restype = ctypes.c_long
+		lib.echotalk_dictionary_entries.argtypes = [p]
+		lib.echotalk_set_buffer_size.restype = ctypes.c_int
+		lib.echotalk_set_buffer_size.argtypes = [p, ctypes.c_uint]
+		lib.echotalk_buffer_size.restype = ctypes.c_uint
+		lib.echotalk_buffer_size.argtypes = [p]
 		lib.echotalk_destroy.restype = None
 		lib.echotalk_destroy.argtypes = [p]
 		lib.echotalk_version.restype = ctypes.c_char_p
@@ -271,6 +346,18 @@ class SynthDriver(SynthDriver):
 			availableInSettingsRing=True, defaultVal=False),
 		BooleanDriverSetting("compressed", "C&ompressed speech",
 			availableInSettingsRing=True, defaultVal=False),
+		# Which implementation of Textalker runs. The default is the 6502
+		# emulation: it is the one validated against real hardware, and it
+		# runs any image at all. The native engine is a C rewrite of the
+		# same speech path, and is what a pronunciation dictionary needs.
+		DriverSetting("engine", "Speech &engine",
+			availableInSettingsRing=True, defaultVal="emulated"),
+		DriverSetting("dictionary", "&Pronunciation dictionary (native engine)",
+			availableInSettingsRing=True, defaultVal=DICT_NONE),
+		# Longer chunks, at the cost of no longer matching the original
+		# byte for byte. 256 is Textalker's own and the default.
+		DriverSetting("linebuffer", "&Line buffer (native engine)",
+			availableInSettingsRing=True, defaultVal="256"),
 	)
 	supportedCommands = {IndexCommand, PitchCommand}
 	supportedNotifications = {synthIndexReached, synthDoneSpeaking}
@@ -306,17 +393,31 @@ class SynthDriver(SynthDriver):
 		self._voices = {}
 		self._pairs = {}
 		for stem, loader, obj in _imagePairs():
-			banner = self._probeBanner(loader, obj)
-			if banner is None:
-				continue
-			self._pairs[stem] = (loader, obj)
-			self._voices[stem] = VoiceInfo(stem, "Textalker %s" % banner)
+			# A disk can carry more than one Textalker, and each deserves
+			# its own voice rather than one of them being picked silently.
+			wants = self._diskVersions(loader) if obj is None else [None]
+			if obj is None and len(wants) > 1:
+				names = ["%s (%s)" % (stem, w) for w in wants]
+			else:
+				names = [stem] * len(wants)
+			for name, want in zip(names, wants):
+				banner = self._probeBanner(loader, obj, want)
+				if banner is None:
+					continue
+				self._pairs[name] = (loader, obj, want)
+				self._voices[name] = VoiceInfo(name, "Textalker %s" % banner)
 		if not self._voices:
 			self._dll.close()
-			raise RuntimeError("no usable Textalker image pairs found next to the driver")
+			raise RuntimeError("no usable Textalker images found next to the driver "
+				"(a <stem>.ram.bin + <stem>.obj.bin pair, or an Apple II "
+				"disk image)")
 
 		# Settings in library units. NVDA overwrites these from its saved
 		# config where there is one; these are what a fresh profile gets.
+		self._engine = "emulated"
+		self._linebuffer = "256"
+		self._dictionary = DICT_NONE
+		self._dictNames = _dictionaries()
 		self._pitch_c = DEFAULT_PITCH
 		self._volume_c = DEFAULT_VOLUME
 		self._delay_c = DEFAULT_DELAY
@@ -342,7 +443,34 @@ class SynthDriver(SynthDriver):
 
 	# --- lifecycle -----------------------------------------------------
 
-	def _probeBanner(self, loader, obj):
+	def _open(self, path, obj, err, version=None):
+		"""Boot a voice, from a loader/obj pair or from a disk image.
+
+		obj is None for a disk image, and the library then finds Textalker
+		on it itself -- structurally, not by filename, so it works for
+		releases nobody has catalogued. `version` picks one when the disk
+		carries several, which really happens: one test disk has 3.1.3 and
+		1.3 side by side.
+		"""
+		if obj is None:
+			return self._lib.echotalk_create_from_disk_version(
+				path.encode("mbcs"),
+				version.encode("mbcs") if version else None,
+				err, len(err))
+		return self._lib.echotalk_create(
+			path.encode("mbcs"), obj.encode("mbcs"), err, len(err))
+
+	def _diskVersions(self, path):
+		"""The Textalker versions on a disk image, or [] if it has none."""
+		buf = ctypes.create_string_buffer(256)
+		n = self._lib.echotalk_disk_versions(path.encode("mbcs"), buf, len(buf))
+		if n <= 0:
+			log.debugWarning("echotalk: %s unusable: %s"
+				% (os.path.basename(path), buf.value.decode("mbcs", "replace")))
+			return []
+		return [v for v in buf.value.decode("mbcs", "replace").split(",") if v]
+
+	def _probeBanner(self, loader, obj, want=None):
 		"""Creates an instance just long enough to read its version banner.
 
 		Costs well under a millisecond, and it is the only way to label a
@@ -351,8 +479,7 @@ class SynthDriver(SynthDriver):
 		registers in globals -- so this must destroy before returning.
 		"""
 		err = ctypes.create_string_buffer(256)
-		h = self._lib.echotalk_create(
-			loader.encode("mbcs"), obj.encode("mbcs"), err, len(err))
+		h = self._open(loader, obj, err, want)
 		if not h:
 			log.debugWarning("echotalk: %s unusable: %s"
 				% (os.path.basename(loader), err.value.decode("mbcs", "replace")))
@@ -385,14 +512,13 @@ class SynthDriver(SynthDriver):
 		survived. Booting costs well under 10 ms, so this is cheap enough
 		to do on a settings change.
 		"""
-		loader, obj = self._pairs[stem]
+		loader, obj, want = self._pairs[stem]
 		err = ctypes.create_string_buffer(256)
 		with self._libLock:
 			if self._handle:
 				self._lib.echotalk_destroy(self._handle)
 				self._handle = None
-			h = self._lib.echotalk_create(
-				loader.encode("mbcs"), obj.encode("mbcs"), err, len(err))
+			h = self._open(loader, obj, err, want)
 			if not h:
 				raise RuntimeError("echotalk_create: %s"
 					% err.value.decode("mbcs", "replace"))
@@ -501,6 +627,113 @@ class SynthDriver(SynthDriver):
 			lib.echotalk_set_speed(h, self._speed)
 			lib.echotalk_set_clock_multiplier(h, self._clock)
 			lib.echotalk_set_sample_rate(h, self._effectiveSamplerate())
+			# Last, and inside the same lock, because a voice change builds
+			# a whole new machine and neither of these survives it.
+			self._applyEngine(lib, h)
+			self._applyBuffer(lib, h)
+			self._applyDictionary(lib, h)
+
+	def _applyEngine(self, lib, h):
+		"""Selects the engine, falling back if this image has no native one.
+
+		The C engine finds its own tables in the image, so every Textalker
+		build seen so far works -- but an unknown one might not, and the
+		right answer then is to keep speaking rather than to fail.
+		"""
+		want = ENGINE_NATIVE if self._engine == "native" else ENGINE_EMULATED
+		if lib.echotalk_set_engine(h, want) != 0:
+			log.warning("echotalk: this Textalker build has no native engine; "
+				"staying on the 6502 emulation")
+			lib.echotalk_set_engine(h, ENGINE_EMULATED)
+
+	def _applyBuffer(self, lib, h):
+		"""Sets the line buffer, which only the native engine has.
+
+		The library refuses a size on an image with no native engine, and
+		that is not worth a warning -- the engine setting already told the
+		user, and the buffer means nothing without it.
+		"""
+		lib.echotalk_set_buffer_size(h, int(self._linebuffer))
+
+	def _get_availableLinebuffers(self):
+		return {
+			"256": StringParameterInfo("256", "256 bytes (as Textalker)"),
+			"512": StringParameterInfo("512", "512 bytes"),
+			"1024": StringParameterInfo("1024", "1024 bytes"),
+			"4096": StringParameterInfo("4096", "4096 bytes"),
+		}
+
+	def _get_linebuffer(self):
+		return self._linebuffer
+
+	def _set_linebuffer(self, value):
+		if value not in BUFFER_SIZES or value == self._linebuffer:
+			return
+		self._linebuffer = value
+		with self._libLock:
+			if self._handle:
+				self._applyBuffer(self._lib, self._handle)
+
+	def _applyDictionary(self, lib, h):
+		"""Loads or clears the pronunciation dictionary.
+
+		Only the native engine consults it, but it is loaded either way, so
+		switching engines needs no reload and a bad file is reported when
+		the user picks it rather than much later.
+		"""
+		err = ctypes.create_string_buffer(256)
+		if self._dictionary == DICT_NONE:
+			lib.echotalk_load_dictionary(h, None, err, len(err))
+			return
+		path = os.path.join(_DIR, self._dictionary + ".dict")
+		if lib.echotalk_load_dictionary(
+				h, path.encode("mbcs"), err, len(err)) != 0:
+			log.warning("echotalk: %s: %s" % (
+				self._dictionary, err.value.decode("mbcs", "replace")))
+			self._dictionary = DICT_NONE
+			lib.echotalk_load_dictionary(h, None, err, len(err))
+			return
+		log.debug("echotalk: %s, %d words" % (
+			self._dictionary, lib.echotalk_dictionary_entries(h)))
+
+	def _get_availableEngines(self):
+		return {
+			"emulated": StringParameterInfo("emulated", "6502 emulation"),
+			"native": StringParameterInfo(
+				"native", "Native (allows a dictionary)"),
+		}
+
+	def _get_engine(self):
+		return self._engine
+
+	def _set_engine(self, value):
+		if value not in ("emulated", "native") or value == self._engine:
+			return
+		self._engine = value
+		with self._libLock:
+			if self._handle:
+				self._applyEngine(self._lib, self._handle)
+
+	def _get_availableDictionarys(self):
+		# NVDA builds the getter name by appending "s" to the setting id,
+		# so this really is spelled "Dictionarys".
+		out = {DICT_NONE: StringParameterInfo(DICT_NONE, "None")}
+		for name in self._dictNames:
+			out[name] = StringParameterInfo(name, name)
+		return out
+
+	def _get_dictionary(self):
+		return self._dictionary
+
+	def _set_dictionary(self, value):
+		if value != DICT_NONE and value not in self._dictNames:
+			return
+		if value == self._dictionary:
+			return
+		self._dictionary = value
+		with self._libLock:
+			if self._handle:
+				self._applyDictionary(self._lib, self._handle)
 
 	def _push(self, fname, value):
 		with self._libLock:

@@ -1,0 +1,82 @@
+;;; An example pronunciation dictionary for EchoTalk's native engine.
+;;;
+;;;   say --native --dict examples/pronunciations.dict \
+;;;       roms/textalker.ram.bin roms/textalker.obj.bin "text" out.wav
+;;;
+;;; The format is CMUdict's, so a copy of cmudict.dict works here
+;;; unmodified and this file can simply be appended to it. A word, some
+;;; whitespace, then ARPABET symbols with CMUdict's stress digits:
+;;; 1 is stressed and takes Textalker's raised pitch group, 0 and 2 are
+;;; not. Lines beginning ";;;" or "#" are comments, and a "WORD(2)"
+;;; variant is ignored -- the first spelling of a word wins.
+;;;
+;;; This is an OVERRIDE LIST. Anything not named here still goes through
+;;; Textalker's own letter-to-sound rules, so the voice, the intonation
+;;; and the spoken punctuation names are untouched.
+;;;
+;;; The entries below are the mispronunciations Jayson identified by ear
+;;; and that HANDOFF.md lists as "reproduce, not fix" -- because the
+;;; EMULATED engine must still reproduce them exactly. This file is how
+;;; you fix them on the native engine without touching either.
+;;;
+;;; THIS FILE IS FOR TEXTALKER 3.1.3. The versions do not mispronounce
+;;; the same words, and nothing in the format says which version a file
+;;; is for, so keep one dictionary per version. v1.3 says BOOT, ROOT,
+;;; SHOOT and COPY correctly on its own, and the respellings below would
+;;; cost it a faint break in the middle of the word for no gain; it has
+;;; mistakes of its own instead, such as BEGIN as "bih-jin".
+
+;;; 3.1.3 silences the K entirely: C{FC}{8B} kills the C before K and
+;;; {9B}K{8E} kills the K before N, with nothing guarding the pair.
+NICKNAME  N IH1 K N EY2 M
+
+;;; 3.1.3 gives this the O of "boat"; v1.3 gets it right.
+COPY  K AA1 P IY0
+COPIES  K AA1 P IY0 Z
+COPIED  K AA1 P IY0 D
+
+;;; "faiv-or-ite", with the I of "bike".
+FAVORITE  F EY1 V ER0 IH0 T
+FAVORITES  F EY1 V ER0 IH0 T S
+FAVOURITE  F EY1 V ER0 IH0 T
+
+;;; v1.3 emits J where 3.1.3 emits G: "bih-jin".
+BEGIN  B IH0 G IH1 N
+BEGINS  B IH0 G IH1 N Z
+BEGINNING  B IH0 G IH1 N IH0 NG
+
+;;; -ING comes out closer to "in": "starting to translate" is roughly
+;;; "startin to translit".
+STARTING  S T AA1 R T IH0 NG
+TRANSLATE  T R AE1 N S L EY0 T
+TRANSLATES  T R AE1 N S L EY0 T S
+TRANSLATING  T R AE1 N S L EY0 T IH0 NG
+
+;;; These two take the same vowel, which is right for one of them.
+BROW  B R AW1
+THROW  TH R OW1
+THROWS  TH R OW1 Z
+
+;;; ------------------------------------------------------------------
+;;; The other two spellings.
+;;;
+;;; "=" is a RESPELLING: say the word however makes Textalker say it
+;;; right, and its own rules do the rest. This is the easy one, it needs
+;;; no phoneme chart, and it is what anyone who has lived with an Echo
+;;; already thinks in. Textalker says BOOT with the vowel of BOOK, and
+;;; "booht" fixes it:
+BOOT   =booht
+BOOTS  =boohts
+ROOT   =rooht
+
+;;; ROUTE is the clearest case of a version-specific entry. Both
+;;; versions rhyme it with "about". Under v1.3 "=root" would be enough,
+;;; since v1.3 says ROOT correctly; under 3.1.3 that does nothing at all
+;;; and it has to go all the way to the respelling above.
+ROUTE  =rooht
+
+;;; "/" is Street Electronics' own Ctrl-V notation, which the Echo
+;;; manual documents, for when you want one exact allophone. A digit
+;;; 1-3 before a vowel character sets its pitch group; 3 is stressed.
+;;; Here "*" is the vowel of LAW and "E" the vowel of BET.
+ECHOTALK  /3EKOT3*K

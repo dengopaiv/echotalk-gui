@@ -36,18 +36,62 @@ that works and `../notes/` for how it was worked out.
        cp ../roms/textalker.ram.bin ../roms/textalker.obj.bin synthDrivers/echotalk/
        cp ../roms/textalker_v13.ram.bin ../roms/textalker_v13.obj.bin synthDrivers/echotalk/
 
+   or, equivalently, the disks they came off:
+
+       cp incorrect.dsk brlboot.dsk synthDrivers/echotalk/
+
    A pair is `<name>.ram.bin` (or `<name>.loader.bin`) plus
    `<name>.obj.bin`. The driver finds every pair sitting next to it, boots
    each one briefly to read its version banner, and offers it as a voice
    under that name — so images this code has never seen still appear
    correctly labelled rather than as "unknown".
 
+   **Or copy in the Apple II disk image itself** — `<name>.dsk`, `.do`,
+   `.po` or `.2mg` — and skip extracting anything. The library reads DOS
+   3.3 disks directly and finds Textalker on one structurally rather than
+   by filename, so a disk becomes a voice exactly as a pair does. The two
+   can be mixed. `tools/tk_extract` does the same job standalone if the
+   `.bin` files themselves are wanted.
+
    **These files are not distributed here.** They are the original
    commercial Textalker, proprietary to Street Electronics, with the 3.1.3
    release also carrying an American Printing House for the Blind
    copyright. Supply your own.
 
-4. The user documentation in `doc/en/` needs **pandoc** on PATH, which
+   **The native engine does not change this**, and a packager should not
+   expect it to. It replaced Textalker's code, not its tables: the
+   letter-to-sound rules, the syllabifier's word lists, the attribute
+   table, the punctuation names and the allophone frames that are the
+   voice -- two fifths of the image -- are read out of the user's copy at
+   run time by both engines equally. Nothing is compiled in.
+   `doc/en/readme.md` explains it for users; the top-level README has the
+   byte counts.
+
+4. Optionally, copy in a pronunciation dictionary. Any `<name>.dict`
+   beside the driver is offered as a setting, and the driver labels it
+   by that name:
+
+       cp ../examples/pronunciations.dict synthDrivers/echotalk/Fixes.dict
+
+   The format is CMUdict's, so `cmudict.dict` works unmodified. **Only
+   the native engine reads one** — the emulated engine runs the real
+   6502, which has nowhere to put it.
+
+   **A dictionary belongs to one Textalker version**, so bundle one per
+   voice and name them so a user can tell which is which. The versions
+   do not mispronounce the same words: 3.1.3 says BOOT, ROOT and SHOOT
+   with the vowel of BOOK while 1.3 says all three correctly, so a fix
+   for one is a small loss on the other. The setting does not follow the
+   Voice setting, by the same reasoning as below —
+   `doc/en/readme.md` tells users to change it themselves.
+
+   Unlike the Textalker images, a `.dict` IS bundled by
+   `build_addon.sh` in both its public and its `--with-images` build,
+   because it is ordinary text and usually the packager's own. If you
+   bundle somebody else's dictionary, its licence is yours to honour —
+   CMUdict's is permissive but does ask for its notice.
+
+5. The user documentation in `doc/en/` needs **pandoc** on PATH, which
    converts each `.md` there to the `.html` NVDA actually opens. Install
    it from <https://pandoc.org/> if `pandoc --version` says nothing.
 
@@ -56,12 +100,12 @@ that works and `../notes/` for how it was worked out.
    than shipping an add-on whose help menu leads nowhere. `manifest.ini`
    names `readme.html`, so that one has to exist.
 
-5. Package it:
+6. Package it:
 
        ./build_addon.sh                # public-safe: no images bundled
        ./build_addon.sh --with-images  # personal build — never distribute
 
-6. Open the resulting `.nvda-addon` on the Windows machine, then choose
+7. Open the resulting `.nvda-addon` on the Windows machine, then choose
    **EchoTalk (emulated Echo II)** in NVDA's synthesizer dialog.
 
 ## Documentation
@@ -104,6 +148,20 @@ catches everything else before an install.
 | Output sample rate | 8 kHz is what the card produced. Higher rates only resample — they add no detail, and exist because some output devices prefer their own rate. A **floor, not a fixed value**: the chip clock scales what the chip produces, so this is raised to meet it rather than downsampling. See below. |
 | Monotone | Flattens the intonation. Textalker treats this as part of the pitch setting, not a separate one. |
 | Compressed speech | Textalker's own fast mode, which drops sounds rather than playing faster. |
+| Speech engine | 6502 emulation (default) or the native C rewrite. Both say the same words -- the rewrite is byte-exact against the emulation at the chip -- but only the native one can take a dictionary. If an image has no native engine the driver stays on the emulation and logs it. |
+| Pronunciation dictionary (native engine) | Any `<name>.dict` beside the driver, or None. **Ignored on the emulated engine**, which runs the real 6502. One dictionary suits one Textalker version; it does not follow the Voice setting. |
+| Line buffer (native engine) | Textalker's own is 256 bytes and that is the default and exact. 512/1024/4096 raise its 240-byte flush in proportion, so the chunk window scales too. A stated divergence, not a free win -- see `echotalk.h`. |
+
+### The engine and the dictionary are two settings, not one
+
+Selecting a dictionary does NOT switch the engine, and a dictionary is
+loaded whichever engine is running. Both are deliberate: switching a
+user's engine behind their back would be surprising, and loading either
+way means the setting takes effect the moment they do switch, and that a
+bad file is reported when they pick it rather than much later.
+
+`_applyAll()` pushes both, last and inside the library lock, because a
+voice change builds a whole new machine and neither survives it.
 
 The chip's own four-step frame rate is deliberately **not** exposed. The
 continuous rate control above sounds better and is smooth; the frame rate

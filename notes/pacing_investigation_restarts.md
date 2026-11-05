@@ -6,8 +6,10 @@ the next session does not re-derive it.
 ## The test case
 `Rubber Baby Buggy Bumper Test/` holds the user's material: `test.bin`
 (`Ctrl-E C` for compressed speech, then "RUBBER BABY BUGGY BUMPERS.",
-then CR), `mame.wav` (MAME reference, extracted from a session
-recording) and `echotalk.wav` (ours).
+then CR), which is tracked, plus the two captures it was measured
+against -- `mame.wav` (MAME reference, extracted from a session
+recording) and `echotalk.wav` (ours) -- which are NOT in the repository,
+since no `.wav` is.
 
 Reproduces exactly: **13735 samples (1.717 s) for v3.1.3 and 13732 for
 v1.3** -- the two Textalker versions agree to 3 samples, so this is not

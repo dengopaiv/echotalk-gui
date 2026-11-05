@@ -59,7 +59,7 @@ typedef struct echotalk echotalk;
  * runtime -- which is what a screen reader does -- has no compile-time
  * check available, so it should call echotalk_abi_version() and compare
  * against this before anything else. */
-#define ECHOTALK_ABI_VERSION 6
+#define ECHOTALK_ABI_VERSION 12
 ECHOTALK_API unsigned echotalk_abi_version(void);
 
 /* --- lifecycle --- */
@@ -69,6 +69,40 @@ ECHOTALK_API unsigned echotalk_abi_version(void);
 ECHOTALK_API echotalk *echotalk_create(const char *loader_path,
                                        const char *obj_path,
                                        char *errbuf, size_t errbuf_len);
+
+/* The same, from an Apple II disk image -- no extraction step at all.
+ *
+ * Takes a 143,360-byte DOS 3.3 image in either sector ordering (.do,
+ * .dsk, .po) or a .2mg wrapper round one, finds Textalker's loader and
+ * engine on it, and boots them. Nothing is matched by filename: the
+ * loader is recognised by the entry trampoline it carries, the engine
+ * by matching a known layout, and the two are paired by the load
+ * address the trampoline names. So this works on a 3.1.x build nobody
+ * has catalogued, exactly as the two-file form does.
+ *
+ * Nibble images (.nib, .woz) are not supported and say so by name.
+ * `tools/tk_extract` does the same job as a standalone program when the
+ * .bin files themselves are what is wanted. */
+ECHOTALK_API echotalk *echotalk_create_from_disk(const char *disk_path,
+                                                 char *errbuf,
+                                                 size_t errbuf_len);
+
+/* The same, asking for one particular version -- "3.1.3", "1.3", or
+ * "unknown" for a build the C engine does not recognise (which the
+ * emulated engine still runs perfectly). NULL means "the best
+ * available", which is what echotalk_create_from_disk() passes.
+ *
+ * A disk really can carry more than one: one of the test disks has
+ * v3.1.3 and v1.3 side by side. */
+ECHOTALK_API echotalk *echotalk_create_from_disk_version(
+    const char *disk_path, const char *want_version,
+    char *errbuf, size_t errbuf_len);
+
+/* The versions on a disk, comma-separated into `out`, so a host can
+ * offer each as its own voice. Returns how many, or -1 if the disk
+ * could not be read at all -- in which case `out` holds the reason. */
+ECHOTALK_API int echotalk_disk_versions(const char *disk_path,
+                                        char *out, size_t cap);
 ECHOTALK_API void echotalk_destroy(echotalk *et);
 
 /* Version banner read out of the loader, e.g. "3.1.3" or "1.3", or
@@ -184,17 +218,66 @@ ECHOTALK_API int echotalk_set_word_delay(echotalk *et, int delay);
 /* Longest run of text handed to Textalker between CRs, in characters.
  *
  * Textalker speaks when its line buffer fills, and that boundary lands
- * wherever it lands -- including mid-word. Worse, in this emulation its
- * own buffer bound is never initialised (nothing plays the part of DOS
- * setting up a screen), so its auto-flush point is undefined. Chunking
- * ahead of it is what keeps text splitting at clause and word
- * boundaries instead. Default 80.
+ * wherever it lands -- including mid-word. Chunking ahead of it is what
+ * keeps text splitting at clause and word boundaries instead.
  *
- * 0 disables chunking entirely. That is not merely "longer lines": it
- * removes the only thing standing between long text and Textalker's
- * uncharacterised flush behaviour. Supported for experimentation, but
- * do not use it for anything that has to be right. */
+ * THE DEFAULT DEPENDS ON THE ENGINE, and follows it automatically until
+ * a host calls this:
+ *
+ *   emulated            80   nothing here plays the part of DOS setting
+ *                            up a screen, so Textalker's own bound is
+ *                            uninitialised and it truncates a line at
+ *                            79 characters. Measured.
+ *   native, 3.1.x      130   the only bound is $DB6A's own flush at 240
+ *                            BYTES, and the syllabifier's sentinels cost
+ *                            up to 1.8 bytes per character.
+ *   native, 1.3        200   no syllabifier, so barely any growth.
+ *
+ * Calling this pins the value: it then stays where the host put it
+ * across engine changes. echotalk_reset_chunk_size() undoes that and
+ * returns the value now in force.
+ *
+ * 0 disables chunking entirely. On the native engine that is merely
+ * "let Textalker split it", which it does at 240 bytes and possibly
+ * mid-word; on the emulated engine it means losing text past 79
+ * characters. Supported for experimentation either way. */
 ECHOTALK_API int echotalk_set_chunk_size(echotalk *et, unsigned chars);
+
+/* Stop pinning it: the window goes back to following the engine.
+ * Returns the size now in force. */
+ECHOTALK_API int echotalk_reset_chunk_size(echotalk *et);
+
+/* EXTENDED LINE BUFFER -- native engine only, and a stated divergence.
+ *
+ * Textalker's line buffer is 256 bytes and it speaks when 240 of them
+ * are used. That is a 1981 constraint, not a property of the speech,
+ * and the native engine does not need it -- but it keeps it by default,
+ * because reproducing Textalker exactly is what makes the rewrite worth
+ * trusting. Three audible behaviours depend on the size, and all three
+ * are reproduced deliberately:
+ *
+ *   - a rule that consumes more characters than are left walks on
+ *     through the previous utterance's leftovers until the phoneme cap
+ *     stops it;
+ *   - that cap, 240 phonemes;
+ *   - the one-code lookahead at the end of a phoneme string, which
+ *     wraps within the buffer.
+ *
+ * Ask for more and those stop matching the real machine. Nothing is
+ * "broken" -- the speech is still Textalker's -- but the output is no
+ * longer byte-identical to the emulation, and the differential tests
+ * are run at 256 for that reason.
+ *
+ * What it buys: THE CHUNK WINDOW SCALES WITH IT. At 1024 bytes a chunk
+ * is four times longer, so most paragraphs are spoken in one piece
+ * instead of five, and the joins go away.
+ *
+ * 256 is the default and exact. The maximum is 4096. Takes effect from
+ * the next utterance; -1 if the size is out of range or this image has
+ * no native engine at all. echotalk_buffer_size() returns 0 in that
+ * case, and the size in force otherwise. */
+ECHOTALK_API int echotalk_set_buffer_size(echotalk *et, unsigned bytes);
+ECHOTALK_API unsigned echotalk_buffer_size(const echotalk *et);
 ECHOTALK_API unsigned echotalk_chunk_size(const echotalk *et);
 
 /* Raw mode: 0 (default) prepares text as echotalk_speak() describes,
@@ -203,6 +286,115 @@ ECHOTALK_API unsigned echotalk_chunk_size(const echotalk *et);
  * otherwise fold away; note that ordinary Ctrl-E commands survive
  * preparation already and do not need it. */
 ECHOTALK_API int echotalk_set_raw(echotalk *et, int raw);
+
+/* Which engine turns text into chip bytes.
+ *
+ *   ECHOTALK_ENGINE_EMULATED (default) runs the real Textalker binary
+ *       under the 6502 emulator, as this library always has.
+ *   ECHOTALK_ENGINE_NATIVE runs the C rewrite in src/tk_*.c, which
+ *       produces the identical byte stream with no 6502 in it. It reads
+ *       its tables out of the same user-supplied image, so it needs no
+ *       extra files and changes nothing about what a host must ship.
+ *
+ *       **EXPERIMENTAL. Its audio is right for most material and not
+ *       all of it, and the gap is Ctrl-V phoneme mode.** The chip byte
+ *       stream is byte-exact always; what differs is when each byte
+ *       reaches the chip, and the chip's output depends on that.
+ *
+ *       Measured with tools/engine_diff.py over random multi-line
+ *       command/phoneme/text streams: v1.3 matches on about 92% of
+ *       them, v3.1.3 on about 75%, and EVERY case that differed
+ *       contained a Ctrl-V phoneme string -- none of the cases without
+ *       one ever did. Whole-file lengths agree to within half a
+ *       percent, and the reference corpus is better than the random
+ *       material -- `engine_diff.py --refs` reports 8 of 9 for v1.3 and
+ *       5 of 9 for v3.1.3, with two more of v3.1.3's differing by one
+ *       block in a thousand -- which is exactly why the random material
+ *       exists.
+ *
+ *       The NVDA driver replaces Ctrl-V with a space before the
+ *       library sees it, so an add-on cannot reach the failing case;
+ *       any other host can.
+ *
+ * This is ORTHOGONAL to which Textalker version is loaded: the version
+ * is decided by the loader/OBJ pair given to echotalk_create(), and
+ * both engines handle both versions. A host offering a choice therefore
+ * has two independent controls -- which voice (image pair), and which
+ * engine.
+ *
+ * The engine may be changed at any time; it takes effect on the next
+ * utterance. Settings, voice and queued text are unaffected.
+ *
+ * That last sentence takes work, and is worth knowing about if you are
+ * reading the code: the two engines each hold their OWN copy of
+ * Textalker's voice state, because the settings reach Textalker as
+ * Ctrl-E commands in the input stream and that stream goes to one
+ * engine at a time. Everything pushed before a switch went to the other
+ * engine's Textalker. So a switch marks the settings block dirty and it
+ * is sent again, ahead of the next utterance. Before that was done,
+ * switching engines mid-session quietly reverted pitch, volume, word
+ * delay, the repeat filter and compressed speech to Textalker's own
+ * startup values while every getter still reported what the caller had
+ * asked for.
+ *
+ * Returns 0, or -1 if the engine is unknown or unavailable (the native
+ * engine needs an image it recognises; echotalk_engine() reports what
+ * is actually in force). */
+#define ECHOTALK_ENGINE_EMULATED 0
+#define ECHOTALK_ENGINE_NATIVE   1
+ECHOTALK_API int echotalk_set_engine(echotalk *et, int engine);
+ECHOTALK_API int echotalk_engine(const echotalk *et);
+
+/* A pronunciation dictionary for the NATIVE engine.
+ *
+ * The native engine's letter-to-sound stage is replaceable -- that is
+ * what the rewrite exists for -- and this is the first thing that plugs
+ * into it. The file is in CMUdict's format, so `cmudict.dict` works
+ * unmodified:
+ *
+ *     NICKNAME  N IH1 K N EY2 M
+ *     TOMATO    T AH0 M EY1 T OW0
+ *
+ * plus two extensions, either of which may replace the ARPABET:
+ *
+ *     BOOT      =booht          a RESPELLING, run through Textalker's
+ *                               own rules -- it says BOOT with the
+ *                               vowel of BOOK, and this fixes it
+ *     ECHOTALK  /3EKOT3*K       Street Electronics' own Ctrl-V
+ *                               notation, for one exact allophone; a
+ *                               digit 1-3 sets the pitch group
+ *
+ * It is an OVERRIDE LIST, not a replacement. Words it does not know,
+ * every mark of punctuation and every space still go through
+ * Textalker's rules, so the voice, the intonation and the spoken
+ * punctuation names are untouched; a dictionary matching nothing gives
+ * byte-identical audio to no dictionary at all.
+ *
+ * ECHOTALK SHIPS NO DICTIONARY. The file is yours, read at run time,
+ * exactly as the Textalker image is. Nothing about its licence reaches
+ * EchoTalk's.
+ *
+ * A DICTIONARY BELONGS TO ONE TEXTALKER VERSION, and the format has no
+ * way of saying which. The versions do not mispronounce the same words:
+ * v3.1.3 says BOOT, ROOT and SHOOT with the vowel of BOOK and v1.3 says
+ * all three correctly, so `BOOT =booht` fixes one and costs the other a
+ * faint break in the middle of the word. A host offering a choice of
+ * dictionaries should expect one per voice.
+ *
+ * `path` NULL removes the dictionary. Returns 0, or -1 with a message
+ * in `errbuf` (which may be NULL). Only the native engine consults it;
+ * loading one while the emulated engine is selected is allowed and
+ * takes effect if the engine is switched. */
+ECHOTALK_API int echotalk_load_dictionary(echotalk *et, const char *path,
+                                          char *errbuf, size_t errbuf_len);
+
+/* How many words the dictionary holds, and how many word lookups have
+ * hit and missed it since it was loaded. Useful for telling "my
+ * dictionary is not being consulted" from "my dictionary does not
+ * contain that word", which are otherwise indistinguishable by ear. */
+ECHOTALK_API long echotalk_dictionary_entries(const echotalk *et);
+ECHOTALK_API long echotalk_dictionary_hits(const echotalk *et);
+ECHOTALK_API long echotalk_dictionary_misses(const echotalk *et);
 
 /* Whether an index mark ends the utterance it sits in. 0 (default) keeps
  * speech continuous across marks; 1 is the older behaviour.

@@ -270,12 +270,22 @@ def main():
 	shutil.copy(src, drvdir)
 	shutil.copy(dll, os.path.join(drvdir,
 		"echotalk64.dll" if ctypes.sizeof(ctypes.c_void_p) == 8 else "echotalk32.dll"))
-	pairs = 0
+	pairs = disks = 0
 	for name in os.listdir(romdir):
+		# Disk images count too: the driver hands those to
+		# echotalk_create_from_disk() and never extracts anything, so a
+		# user can drop the Apple II floppy image in beside the DLL.
 		if name.endswith((".ram.bin", ".obj.bin", ".loader.bin")):
 			shutil.copy(os.path.join(romdir, name), drvdir)
 			pairs += name.endswith(".obj.bin")
-	print(f"staged {pairs} image pair(s) in {drvdir}")
+		elif name.lower().endswith((".dsk", ".do", ".po", ".2mg")):
+			shutil.copy(os.path.join(romdir, name), drvdir)
+			disks += 1
+		elif name.lower().endswith(".dict"):
+			# Pronunciation dictionaries are discovered the same way, and
+			# the driver offers each as a setting.
+			shutil.copy(os.path.join(romdir, name), drvdir)
+	print(f"staged {pairs} image pair(s) and {disks} disk image(s) in {drvdir}")
 
 	# Turn on the sequence logging so the harness proves the diagnostic
 	# actually reports what it claims to.
@@ -290,8 +300,14 @@ def main():
 	pcm = bytearray()
 	try:
 		voices = synth._getAvailableVoices()
-		f.check("voices discovered from the image banners", len(voices) == pairs,
-			", ".join(v.displayName for v in voices.values()))
+		# A disk can carry MORE than one Textalker -- both.dsk has 3.1.3
+		# and 1.3 side by side -- and each becomes its own voice, so the
+		# count is a floor rather than an equality.
+		f.check("voices discovered from the images",
+			len(voices) >= pairs + disks and len(voices) > 0,
+			"%d voice(s) from %d pair(s) and %d disk(s): %s"
+			% (len(voices), pairs, disks,
+			   ", ".join(v.displayName for v in voices.values())))
 		f.check("default voice is Textalker 3.x",
 			voices[synth.voice].displayName.rsplit(" ", 1)[-1].startswith("3"),
 			voices[synth.voice].displayName)
@@ -432,6 +448,62 @@ def main():
 		synth.compressed = True
 		pcm += speak_and_wait(["This sentence is compressed."], "compressed")
 		synth.compressed = False
+
+		# The engine, and the dictionary that only the native one reads.
+		#
+		# The point of the comparison is that BOTH engines say the same
+		# words -- so the check is that each produces speech of a sane
+		# length, not that the samples match. Two renderings of the same
+		# utterance differ by a small phase shift by design, and asserting
+		# equality of audio is the mistake this project has made most.
+		engines = list(synth._get_availableEngines())
+		f.check("both engines are offered",
+			engines == ["emulated", "native"], ", ".join(engines))
+		plain = speak_and_wait(["The favorite nickname is a boot."],
+			"emulated engine")
+		pcm += plain
+		synth.engine = "native"
+		f.check("engine switches to native", synth.engine == "native")
+		native = speak_and_wait(["The favorite nickname is a boot."],
+			"native engine")
+		pcm += native
+		f.check("the native engine speaks the same utterance",
+			abs(len(native) - len(plain)) < len(plain) // 8,
+			f"{len(plain) // 2} vs {len(native) // 2} samples")
+
+		sizes = list(synth._get_availableLinebuffers())
+		f.check("line buffer sizes are offered", sizes[0] == "256",
+			", ".join(sizes))
+		synth.linebuffer = "1024"
+		f.check("line buffer grows", synth.linebuffer == "1024")
+		bigger = speak_and_wait(["The favorite nickname is a boot."],
+			"native engine, 1024-byte line buffer")
+		pcm += bigger
+		f.check("it still speaks the same utterance",
+			abs(len(bigger) - len(native)) < len(native) // 8,
+			f"{len(native) // 2} vs {len(bigger) // 2} samples")
+		synth.linebuffer = "256"
+
+		dicts = [d for d in synth._get_availableDictionarys() if d != "(none)"]
+		if dicts:
+			synth.dictionary = dicts[0]
+			f.check("dictionary selected", synth.dictionary == dicts[0],
+				dicts[0])
+			fixed = speak_and_wait(["The favorite nickname is a boot."],
+				"native engine with a dictionary")
+			pcm += fixed
+			# A dictionary that overrides words in this sentence has to
+			# change the audio; if it did not, it was never consulted.
+			f.check("the dictionary changed the speech",
+				bytes(fixed) != bytes(native),
+				f"{len(native) // 2} vs {len(fixed) // 2} samples")
+			synth.dictionary = "(none)"
+			f.check("dictionary can be removed",
+				synth.dictionary == "(none)")
+		else:
+			print("  --    no .dict staged; dictionary not exercised")
+		synth.engine = "emulated"
+		f.check("engine switches back", synth.engine == "emulated")
 
 		# Rate, as the slider moves.
 		for pct, label in ((25, "rate 25%"), (75, "rate 75%")):

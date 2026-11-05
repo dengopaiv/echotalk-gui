@@ -33,7 +33,9 @@ int main(int argc, char **argv) {
     int word_delay = -1, repeat_filter = -1;
     int chunk = -1, raw = 0;
     int flat = 0, letter_mode = -1, punctuation = -1;
-    const char *text_file = NULL;
+    int engine = 0;
+    const char *text_file = NULL, *dict_file = NULL, *disk = NULL, *diskver = NULL;
+    int bufsize = 0;
     const char *pos[4]; int npos = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -48,6 +50,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--chunk") && i + 1 < argc) chunk = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-chunk")) chunk = 0;
         else if (!strcmp(argv[i], "--raw")) raw = 1;
+        else if (!strcmp(argv[i], "--native")) engine = 1;
+        else if (!strcmp(argv[i], "--emulated")) engine = 0;
+        else if (!strcmp(argv[i], "--dict") && i + 1 < argc) dict_file = argv[++i];
+        else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
+        else if (!strcmp(argv[i], "--disk-version") && i + 1 < argc)
+            diskver = argv[++i];
+        else if (!strcmp(argv[i], "--buffer") && i + 1 < argc)
+            bufsize = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pitch") && i + 1 < argc) pitch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc) volume = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--flat")) flat = 1;
@@ -57,11 +67,21 @@ int main(int argc, char **argv) {
             fprintf(stderr, "unknown option %s\n", argv[i]); return 1;
         } else if (npos < 4) pos[npos++] = argv[i];
     }
-    /* With --file the text positional is dropped. */
-    int want = text_file ? 3 : 4;
+    /* With --file the text positional is dropped; with --disk the
+     * loader and obj pair is, because the disk image carries both. */
+    int base = disk ? 0 : 2;
+    int want = base + (text_file ? 1 : 2);
     if (npos != want) {
         fprintf(stderr,
             "usage: %s [options] <loader.bin> <obj.bin> [text] <out.wav>\n"
+            "       %s --disk <disk.dsk> [options] [text] <out.wav>\n"
+            "  --disk PATH        an Apple II disk image (.dsk/.do/.po/.2mg)\n"
+            "                     to take Textalker from, instead of a\n"
+            "                     loader/obj pair extracted beforehand\n"
+            "  --disk-version V   which one, if the disk carries several\n"
+            "  --buffer N         native engine: grow Textalker's 256-byte\n"
+            "                     line buffer to N, up to 4096. Longer\n"
+            "                     chunks, but no longer byte-exact\n"
             "  --file PATH        read the text from a file instead of the\n"
             "                     command line (omit the text argument)\n"
             "  --rate HZ          output sample rate (default 8000, native).\n"
@@ -85,6 +105,7 @@ int main(int argc, char **argv) {
             "  --chunk N          split long lines every N characters (default 80)\n"
             "  --no-chunk         never split; see the warning it prints\n"
             "  --raw              send bytes to Textalker untouched\n"
+            "  --native           the C rewrite instead of the 6502\n"
             "\n"
             "The text may also carry Ctrl-D driver commands: 0x04, an optional\n"
             "number, then a letter. 2F frame rate, 0.75C clock, 0B chunking off,\n"
@@ -92,7 +113,7 @@ int main(int argc, char **argv) {
             "default, and a doubled 0x04 is one literal 0x04. Each command ends\n"
             "the current utterance, so what precedes it speaks at the old\n"
             "settings. Index marks are reported on stderr as they are reached.\n",
-            argv[0]);
+            argv[0], argv[0]);
         return 1;
     }
 
@@ -108,12 +129,21 @@ int main(int argc, char **argv) {
         filetext[len] = 0;
         fclose(tf);
     }
-    const char *text = text_file ? filetext : pos[2];
-    const char *outpath = text_file ? pos[2] : pos[3];
+    const char *text = text_file ? filetext : pos[base];
+    const char *outpath = text_file ? pos[base] : pos[base + 1];
 
     char err[256];
-    echotalk *et = echotalk_create(pos[0], pos[1], err, sizeof err);
-    if (!et) { fprintf(stderr, "echotalk_create: %s\n", err); return 1; }
+    if (disk) {
+        char vers[256];
+        int nv = echotalk_disk_versions(disk, vers, sizeof vers);
+        if (nv > 1)
+            fprintf(stderr, "%s carries Textalker %s"
+                    " (--disk-version picks one)\n", disk, vers);
+    }
+    echotalk *et = disk
+        ? echotalk_create_from_disk_version(disk, diskver, err, sizeof err)
+        : echotalk_create(pos[0], pos[1], err, sizeof err);
+    if (!et) { fprintf(stderr, "%s: %s\n", disk ? disk : pos[1], err); return 1; }
 
     fprintf(stderr, "Textalker version %s\n", echotalk_version(et));
 
@@ -133,6 +163,44 @@ int main(int argc, char **argv) {
     if (repeat_filter >= 0 && echotalk_set_repeat_filter(et, repeat_filter)) fprintf(stderr, "bad --repeat-filter\n");
     if (chunk >= 0 && echotalk_set_chunk_size(et, (unsigned)chunk)) fprintf(stderr, "bad --chunk\n");
     if (raw) echotalk_set_raw(et, 1);
+    if (engine && echotalk_set_engine(et, ECHOTALK_ENGINE_NATIVE) != 0) {
+        fprintf(stderr, "the native engine does not recognise this image\n");
+        echotalk_destroy(et);
+        return 1;
+    }
+    /* So does an extended buffer: it is the native engine's line
+     * buffer, and the emulated one runs the real 6502's. */
+    if (bufsize) {
+        if (echotalk_set_engine(et, ECHOTALK_ENGINE_NATIVE) != 0
+            || echotalk_set_buffer_size(et, (unsigned)bufsize) != 0) {
+            fprintf(stderr, "--buffer needs the native engine and a size "
+                    "between 256 and 4096\n");
+            echotalk_destroy(et);
+            return 1;
+        }
+        engine = 1;
+        fprintf(stderr, "line buffer %u bytes, chunk %u\n",
+                echotalk_buffer_size(et), echotalk_chunk_size(et));
+    }
+
+    /* A dictionary implies the native engine: it is the only one with a
+     * replaceable letter-to-sound stage. */
+    if (dict_file) {
+        char derr[256];
+        if (!engine && echotalk_set_engine(et, ECHOTALK_ENGINE_NATIVE) != 0) {
+            fprintf(stderr, "--dict needs the native engine, which does not "
+                    "recognise this image\n");
+            echotalk_destroy(et);
+            return 1;
+        }
+        if (echotalk_load_dictionary(et, dict_file, derr, sizeof derr) != 0) {
+            fprintf(stderr, "%s\n", derr);
+            echotalk_destroy(et);
+            return 1;
+        }
+        fprintf(stderr, "%s: %ld words\n", dict_file,
+                echotalk_dictionary_entries(et));
+    }
 
     /* The chip's own output rate moves with the clock multiplier: at 1.5
      * it really is producing 12000 Hz. Writing that out at 8000 would

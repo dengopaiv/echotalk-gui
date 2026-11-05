@@ -9,6 +9,95 @@ out to be wrong and why.
 > anything before session 11 predates the step-budget fix.
 > **HANDOFF.md's baseline table is the only authority.**
 
+## Active work: the C rewrite (branch `Textalker-RW`)
+
+**Finished and byte-exact** against the emulation, for **both
+Textalker versions**, in Python and now in C. Raw input goes in and the
+exact TMS5220 byte stream comes out, with no 6502 in it: the whole
+speech path, the Ctrl-E command set included. The two versions can be
+mixed (`--rules` / `--voice`, though the voice data turns out to be
+identical).
+
+The C port is `src/tk_*.c`, one file per Python module, driven by
+`tools/tk_phonemes.c` and `tools/tk_chip.c` and tested by
+`tools/tk_diff.py` against either the Python (fast) or the emulator
+(the acceptance test). No table is compiled in: everything is read out
+of the user's own image at run time.
+
+It is wired into the library as a selectable engine
+(`echotalk_set_engine`), with `tools/engine_diff.py` comparing the two
+engines' AUDIO. **The letter-to-sound seam it exists for is now built**:
+`tk_g2p` in `src/tk.h`, with `src/tk_dict.c` (a CMUdict-format
+dictionary read at run time) as the first source and
+`tools/seam_diff.py` as its differential test.
+
+The engine comparison is byte-exact at the chip bytes and not yet
+phase-identical in the audio; HANDOFF's `Textalker-RW` section has the
+numbers, the cycle model behind them, and why it stopped where it did.
+
+- `phoneme_alphabet.md` -- **the table the seam stands on**: which of
+  Textalker's 58 allophones is which sound, how a one-byte phoneme code
+  splits into an allophone index and a pitch group, and how the
+  correspondence was read (by putting every vowel of English into a
+  frame whose pronunciation is not in doubt and asking stage 1, not by
+  guessing at the Ctrl-V characters). Also the two things ARPABET
+  cannot carry -- the pitch group, and the order of the /z/ pair -- and
+  why what is written down there is a measurement rather than Street
+  Electronics' data.
+- `textalker3_rule_changes.md` -- **software archaeology: what Street
+  Electronics changed between 1.3 and 3, and why it made some words
+  worse.** Textalker 3 is not a patched 1.3 -- it is the rule set
+  rebuilt on a syllabifier 1.3 does not have, trading enumeration for
+  generalisation: the whole-word rules were deleted and replaced by
+  general rules that ask the syllabifier questions. Names the rule
+  behind each of BOOT/ROOT/SHOOT (`OO{FC}{FD}`, OO before any stop),
+  COPY (the open-syllable rule, and why JOLLY survives it), NICKNAME
+  (**`KN` in the cluster list**, which also breaks ACKNOWLEDGE and
+  UNKNOWN) and THOUGH (a correct list of voiced-TH words replaced by an
+  approximate rule). The G section is the control: 1.3 enumerates until
+  its list runs out at GIRL, 3.1.3 generalises until its rule runs over
+  GIANT, and both say TIGER as *tie-jer* -- method, not care. Also that
+  somebody rewrote the GHOTI easter egg to survive the new syllabifier. Also what the four syllabifier word lists do (not their contents, in this fork), the
+  74-of-200 measure of how far the two versions diverge, and the two
+  explanations -- space pressure, and nobody testing -- that the
+  evidence rules out.
+- **Three disassembly listings are not in this fork:** `disasm_rule_engine.txt`
+  (the 3.1.3 syllabifier and rule engine), `disasm_v13.txt` (Textalker 1.3) and
+  `disasm_stage2.txt` (the synthesiser). They hold Textalker's own machine code,
+  which is Street Electronics' and proprietary, and this fork leaves them out by
+  its owner's decision of 2026-11-05. References to them elsewhere in these notes
+  and in code comments are left as Jayson Smith wrote them. The listings are on
+  his branch `Textalker-RW`, and `tools/disasm.py` makes them from your own image.
+- `textalker_rewrite_table_discovery.md` -- **the full record of the C
+  rewrite.** Textalker is table-driven, so replacing the 6502 means
+  decoding its tables and porting a small interpreter, not writing a TTS
+  engine. Covers the dispatch table, every metacharacter (all now read
+  from the 6502), the syllabifier, the stress pass, the three
+  differential checkpoints, and the mispronunciations that must be
+  reproduced rather than fixed. Starts with a STATE block saying where
+  to pick up, followed by "What was wrong with the model", which is the
+  correction that finished stage 1. **Large parts of the rest are
+  superseded** -- every reading that treats a syllable boundary as a
+  zero-width assertion, and every reading of `$9C` as the coronal
+  stops. Those sections say so at their head, and are kept because the
+  measurements in them are sound even where the conclusions were not.
+
+- `profile_discovery.md` -- **the C engine finds its tables rather than
+  listing addresses.** What each table's shape is, why the punctuation
+  and dispatch tables identify each other, why `rule_hi` is the end of
+  the image, why a page of zeros looked exactly like a word list, and
+  what is still per-family (the workspace) with the measurement that
+  says it holds. Ends with the one branch displacement that separates two
+  otherwise-identical 3.1.2 builds -- and is what made a comma in Ctrl-V
+  phoneme mode swallow the rest of the line on one of them.
+- `disk_image_extraction.md` -- **how Textalker gets off an Apple II
+  floppy image**, in C, with no Python and no CiderPress: the DOS 3.3
+  reader, why detecting the sector ordering from the VTOC alone does not
+  work (sectors 0 and 15 are fixed points of the interleave, so the VTOC
+  and the first catalogue sector look identical in both orders), and why
+  the loader/engine pair is found structurally rather than by filename.
+  Also what the round-trip test proves and what only a real disk can.
+
 ## Current design -- read these to understand what exists
 
 - `streaming_and_indexing.md` -- pull-driven synthesis and index events.

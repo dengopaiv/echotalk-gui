@@ -31,8 +31,9 @@ do safely, fixed by hand:
 **Compiles clean**, and **produces real audio**: fed the exact 58-byte
 "HI" command stream captured from the working v3.1.3 harness, it
 generates 3,201 samples (0.4s at 8kHz) with full dynamic range and
-real waveform variation -- not silence, not garbage. `hi_test.wav` /
-`hi_normal.wav` are that output; give them a listen.
+real waveform variation -- not silence, not garbage. The WAVs that was
+judged from are not in the repository (no `.wav` is); `make listen`, or
+`say` on `reference_text/hi_only.bin`, regenerates the equivalent.
 
 ## Clock rate (speed + pitch together)
 The chip's internal state machine has no concept of wall-clock time --

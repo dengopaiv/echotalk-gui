@@ -126,6 +126,16 @@ with a note. It **fails and deletes the zip if anything in it could be a
 Textalker image**, then renders from a copy unpacked into an empty folder.
 It passed end to end on 2026-09-15.
 
+**Since 2026-11-05 the reference DLL has to be built from this tree.** The code
+of upstream's branch `Textalker-RW` came in that day, with a fix: the old library
+stored the reading mode and punctuation settings and never sent them to Textalker.
+So the 12 cases that set them no longer match a DLL shipped in the old add-on, and
+that is the old DLL's fault. Build one with MinGW GCC (`make win64-dll`) and pass it:
+`python tools\verify_gui.py <romdir> <echotalk.dll>`. On 2026-11-05 this gave 114 of
+114. `build_release.py` takes the same two arguments, and was not rerun that day.
+The GUI does not yet offer the native engine, dictionaries or disk images:
+[../notes/textalker_rw_branch_study.md](../notes/textalker_rw_branch_study.md).
+
 - **Against the add-on itself — 114 cases, all byte-identical.**
   `verify_gui.py` holds the add-on driver's speaking path with NVDA removed
   (`_openVoice`, `_applyAll` and its conversions, `speak`'s sanitising,

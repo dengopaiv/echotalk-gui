@@ -48,3 +48,4 @@ dist/
 
 # Python bytecode from running the tools
 __pycache__/
+*.pyc

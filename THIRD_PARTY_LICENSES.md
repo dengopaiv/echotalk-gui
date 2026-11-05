@@ -104,6 +104,50 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ---
 
+## Pronunciation dictionaries — supplied by the user, not by EchoTalk
+
+**Files:** none. That is the point of this section.
+
+`echotalk_load_dictionary()` and `say --dict` read a pronunciation
+dictionary at run time, in CMUdict's format. **EchoTalk ships no
+dictionary**, contains no dictionary data, and links against nothing
+that does — exactly the arrangement already in place for the Textalker
+images below. The file is the user's; whatever terms it carries are
+between the user and whoever wrote it, and none of them reach EchoTalk's
+own BSD-3-Clause licence.
+
+This matters because the obvious candidates are not all compatible, and
+combining a copyleft one into a BSD-licensed program would force the
+whole program to that licence. The distinction that keeps EchoTalk clear
+is between **code linked into the binary** and **data read at run time
+from a file the user chose**:
+
+- **eSpeak NG is GPLv3.** Linking its letter-to-sound code into EchoTalk
+  would make the combined work GPLv3. Running `espeak` as a **separate
+  program** and feeding its output in is a different matter — separate
+  processes exchanging data are not a combined work — and so is a
+  dictionary file the user generates with it and points EchoTalk at.
+- **CMUdict is under a permissive BSD-style notice** and is the intended
+  default. It is data either way, so the run-time arrangement above
+  makes its terms moot for EchoTalk, but it would also be safe to ship
+  if that were ever wanted. Check the notice in whichever copy is used.
+- **The NRL letter-to-sound rules** (Elovitz et al., NRL Report 7948,
+  1976) are a US Government work and in the public domain in the US.
+  Several C implementations circulate with public-domain notices of
+  their own; verify the header of whichever copy is taken rather than
+  trusting the lineage.
+- **CMU Flite** is BSD-style, and carries letter-to-sound models trained
+  on CMUdict. Compatible if code is ever wanted rather than data.
+- **MaryTTS is LGPL and Sequitur G2P is GPL.** Neither can be linked in.
+
+Nothing above is legal advice, and none of it has been reviewed by a
+lawyer. It is recorded because the question came up and the answer
+shaped the design: **the seam takes data at run time precisely so that
+this stays the user's decision.** `src/tk_dict.c` and
+`notes/phoneme_alphabet.md` have the mechanics.
+
+---
+
 ## Not third-party code, but note on the contents of `roms/`
 
 `roms/` holds Textalker binaries (`textalker.obj.bin`,

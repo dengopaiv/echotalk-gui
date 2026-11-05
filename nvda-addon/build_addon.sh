@@ -63,15 +63,36 @@ done
 rm -f echotalk.nvda-addon
 # The Markdown sources stay out of the package; only the generated HTML and
 # the GPL text ship.
+# A Textalker image can now be either an extracted .bin pair OR the Apple
+# II disk image itself, which the library reads directly. Both are
+# proprietary and BOTH have to be kept out of a public build -- a disk is
+# worse, in fact, since it carries everything else that was on that
+# floppy as well.
+shopt -s nullglob
+images=("$DRV"/*.obj.bin "$DRV"/*.dsk "$DRV"/*.do "$DRV"/*.po "$DRV"/*.2mg)
 if [[ $WITH_IMAGES == 1 ]]; then
-    shopt -s nullglob
-    images=("$DRV"/*.obj.bin)
     [[ ${#images[@]} -gt 0 ]] || { echo "no Textalker images to bundle" >&2; exit 1; }
     zip -r -q echotalk.nvda-addon manifest.ini synthDrivers doc \
         -x "$DOC/*.md"
     echo "wrote echotalk.nvda-addon (PRIVATE build: bundles proprietary Textalker images, do not distribute)"
 else
     zip -r -q echotalk.nvda-addon manifest.ini synthDrivers doc \
-        -x "$DRV/*.bin" -x "$DOC/*.md"
+        -x "$DRV/*.bin" -x "$DOC/*.md" \
+        -x "$DRV/*.dsk" -x "$DRV/*.do" -x "$DRV/*.po" -x "$DRV/*.2mg"
+    [[ ${#images[@]} -gt 0 ]] && \
+        echo "kept ${#images[@]} Textalker image file(s) out of the package"
     echo "wrote echotalk.nvda-addon (public-safe, no Textalker images)"
+fi
+
+# "Public-safe" is a claim about the inside of a zip nobody will open, so
+# check it rather than assert it. A file glob that misses a new image
+# format is exactly the kind of mistake this catches.
+if [[ $WITH_IMAGES != 1 ]] && command -v unzip >/dev/null 2>&1; then
+    leaked=$(unzip -Z1 echotalk.nvda-addon 2>/dev/null |
+             grep -icE "\.(bin|dsk|do|po|2mg)$" || true)
+    if [[ ${leaked:-0} -gt 0 ]]; then
+        echo "REFUSING: $leaked image file(s) reached a public-safe package" >&2
+        rm -f echotalk.nvda-addon
+        exit 1
+    fi
 fi
